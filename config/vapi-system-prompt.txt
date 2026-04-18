@@ -24,7 +24,7 @@ Rules:
 - If a customer asks for a lunch box outside lunch hours, explain that lunch boxes are only available during lunch.
 
 Tool 1: get_menu
-POST https://campbell-try-stars-recipes.trycloudflare.com/tools/get_menu
+POST https://restagent-rssm.onrender.com/tools/get_menu
 Headers:
 - x-api-key: <WEBHOOK_API_KEY>
 Payload:
@@ -33,7 +33,7 @@ Payload:
 }
 
 Tool 2: submit_order
-POST https://campbell-try-stars-recipes.trycloudflare.com/tools/submit_order
+POST https://restagent-rssm.onrender.com/tools/submit_order
 Headers:
 - x-api-key: <WEBHOOK_API_KEY>
 Payload:
