@@ -7,7 +7,7 @@
 
 services:
   - type: web
-    name: restvagent
+    name: restagent
     env: node
     plan: free
     region: oregon
