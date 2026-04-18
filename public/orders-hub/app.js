@@ -22,10 +22,26 @@ function apiHeaders() {
   return h;
 }
 
+/** Render free tier returns plain "Not Found" when the dyno is asleep (no JSON body). */
+async function parseJsonResponse(res, label) {
+  if (res.status === 401) throw new Error("unauthorized");
+  const ct = res.headers.get("content-type") || "";
+  if (!ct.includes("application/json")) {
+    const text = (await res.text()).trim();
+    if (res.status === 404 && (!text || text === "Not Found")) {
+      throw new Error(
+        "Server is waking up (Render free tier sleeps when idle). Wait 30–60 seconds, then click Refresh.",
+      );
+    }
+    throw new Error(text || `HTTP ${res.status} (${label})`);
+  }
+  const data = await res.json();
+  return data;
+}
+
 async function fetchOrders() {
   const res = await fetch("/internal/orders-hub/orders", { headers: apiHeaders() });
-  if (res.status === 401) throw new Error("unauthorized");
-  const data = await res.json();
+  const data = await parseJsonResponse(res, "orders");
   if (!data.success) throw new Error(data.error || "fetch_failed");
   return data;
 }
@@ -36,8 +52,7 @@ async function patchOrder(hubOrderId, body) {
     headers: { ...apiHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (res.status === 401) throw new Error("unauthorized");
-  const data = await res.json();
+  const data = await parseJsonResponse(res, "patch");
   if (!data.success) throw new Error(data.error || "patch_failed");
   return data.order;
 }
