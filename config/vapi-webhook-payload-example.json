@@ -1,0 +1,21 @@
+{
+  "sessionId": "session_abc_001",
+  "callId": "call_abc_001",
+  "restaurantId": "rest_001",
+  "customerPhone": "+15551234567",
+  "items": [
+    {
+      "menuItemName": "Chicken Dum Biryani",
+      "quantity": 1,
+      "specialInstructions": "medium spice"
+    },
+    {
+      "menuItemName": "Garlic Naan",
+      "quantity": 2
+    },
+    {
+      "menuItemName": "Butter Chicken",
+      "quantity": 1
+    }
+  ]
+}

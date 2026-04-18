@@ -1,0 +1,104 @@
+{
+  "restaurantId": "rest_001",
+  "items": [
+    {
+      "name": "Samosa",
+      "category": "Appetizers",
+      "description": "Crispy pastry stuffed with spiced potatoes and peas.",
+      "toastGuid": "abc-201",
+      "price": 7.99,
+      "outOfStock": false
+    },
+    {
+      "name": "Masala French Fries",
+      "category": "Appetizers",
+      "description": "French fries tossed with bold Indian spices.",
+      "toastGuid": "abc-202",
+      "price": 8.39,
+      "outOfStock": false
+    },
+    {
+      "name": "Momo 65",
+      "category": "Appetizers",
+      "description": "Crispy dumplings coated in spicy 65-style seasoning.",
+      "toastGuid": "abc-203",
+      "price": 13.19,
+      "outOfStock": false
+    },
+    {
+      "name": "Butter Chicken",
+      "category": "Curries",
+      "description": "Creamy tomato-based curry with tender chicken.",
+      "toastGuid": "abc-204",
+      "price": 15.0,
+      "outOfStock": false
+    },
+    {
+      "name": "Chicken Dum Biryani",
+      "category": "Biryani",
+      "description": "Aromatic basmati rice with spiced chicken and herbs.",
+      "toastGuid": "abc-205",
+      "price": 17.0,
+      "outOfStock": false,
+      "alternatives": ["Butter Chicken", "Lamb Chops"]
+    },
+    {
+      "name": "Garlic Naan",
+      "category": "Breads",
+      "description": "Fresh naan bread brushed with garlic butter.",
+      "toastGuid": "abc-206",
+      "price": 3.49,
+      "outOfStock": false
+    },
+    {
+      "name": "Lamb Chops",
+      "category": "Main Dishes",
+      "description": "Seasoned lamb chops served with the chef's special sauce.",
+      "toastGuid": "abc-207",
+      "price": 20.0,
+      "outOfStock": false,
+      "alternatives": ["Butter Chicken", "Chicken Dum Biryani"]
+    },
+    {
+      "name": "Vegetarian Lunch Box",
+      "category": "Lunch Boxes",
+      "description": "Weekday lunch box with appetizer, curry, rice, bread, dessert, and salad.",
+      "toastGuid": "abc-208",
+      "price": 11.99,
+      "outOfStock": false,
+      "schedule": {
+        "start": "11:30",
+        "end": "14:30"
+      }
+    },
+    {
+      "name": "Non-Vegetarian Lunch Box",
+      "category": "Lunch Boxes",
+      "description": "Weekday lunch box with appetizer, curry, rice, bread, dessert, and salad.",
+      "toastGuid": "abc-209",
+      "price": 14.39,
+      "outOfStock": false,
+      "schedule": {
+        "start": "11:30",
+        "end": "14:30"
+      }
+    },
+    {
+      "name": "Rasmalai",
+      "category": "Desserts",
+      "description": "Soft cheese dumplings soaked in sweetened milk.",
+      "toastGuid": "abc-210",
+      "price": 5.0,
+      "outOfStock": false
+    },
+    {
+      "name": "Cut Mirchi",
+      "category": "Appetizers",
+      "description": "Stuffed green chilies with a crunchy seasoned coating.",
+      "toastGuid": "abc-211",
+      "price": 11.99,
+      "outOfStock": true,
+      "alternatives": ["Samosa", "Masala French Fries", "Momo 65"]
+    }
+  ]
+}

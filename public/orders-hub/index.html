@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Orders Hub — AI phone orders</title>
+    <link rel="stylesheet" href="/orders-hub/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top-bar">
+        <div class="brand">
+          <span class="brand-mark">Toast-style</span>
+          <h1>Orders Hub</h1>
+          <span class="subtitle">AI phone channel · read-only mirror of submitted orders</span>
+        </div>
+        <div class="top-meta">
+          <div class="quote-block">
+            <span class="label">Takeout quote (demo)</span>
+            <strong id="quoteLabel">— min</strong>
+          </div>
+          <button type="button" class="btn secondary" id="btnSettings">API key</button>
+          <button type="button" class="btn primary" id="btnRefresh">Refresh</button>
+        </div>
+      </header>
+
+      <nav class="tabs" id="tabBar" aria-label="Order status"></nav>
+
+      <div class="toolbar">
+        <input type="search" id="searchInput" placeholder="Search guest, phone, check #…" autocomplete="off" />
+        <span class="hint" id="authHint"></span>
+      </div>
+
+      <main class="layout">
+        <section class="order-list" id="orderList"></section>
+        <aside class="detail-panel" id="detailPanel">
+          <p class="empty-detail">Select an order to see guest, items, and actions.</p>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="settingsDialog" class="modal">
+      <div class="modal-form">
+        <h2>API access</h2>
+        <p class="modal-copy">
+          Uses the same key as your webhooks: set <code>WEBHOOK_API_KEY</code> or override with
+          <code>ORDERS_HUB_API_KEY</code> in <code>.env</code>. Stored in this browser only
+          (sessionStorage).
+        </p>
+        <label>
+          <span>x-api-key</span>
+          <input type="password" id="apiKeyInput" autocomplete="off" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn secondary" id="btnCancelKey">Cancel</button>
+          <button type="button" class="btn primary" id="btnSaveKey">Save</button>
+        </div>
+      </div>
+    </dialog>
+
+    <script src="/orders-hub/app.js"></script>
+  </body>
+</html>

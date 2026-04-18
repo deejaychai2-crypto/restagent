@@ -1,0 +1,16 @@
+# Free stable demo URL: https://<service-name>.onrender.com (no custom domain).
+# Connect repo at https://render.com → New + → Blueprint → point at this file,
+# or New + → Web Service and match these commands.
+#
+# After deploy: set env vars in the Render dashboard (see README), then set
+# PUBLIC_BASE_URL to your service URL and run npm run vapi:sync-prompt locally.
+
+services:
+  - type: web
+    name: restvagent
+    env: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health/live

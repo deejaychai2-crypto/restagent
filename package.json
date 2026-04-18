@@ -1,0 +1,29 @@
+{
+  "name": "restvagent",
+  "version": "1.0.0",
+  "description": "AI voice ordering webhook service with Toast integration",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "test:order": "node scripts/send-test-order.js",
+    "test:local": "node scripts/run-local-tests.js",
+    "vapi:urls": "node scripts/print-vapi-urls.js",
+    "vapi:sync-prompt": "node scripts/apply-public-url-to-prompt.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "axios": "^1.15.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
+    "zod": "^4.3.6"
+  }
+}

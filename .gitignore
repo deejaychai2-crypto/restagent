@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Secrets and local env (use .env.example as template)
+.env
+.env.local
+.env.*.local
+
+# Runtime / machine-local state (recreated by the server)
+data/idempotency-store.json
+data/orders-hub-store.json
+
+# Logs and OS noise
+*.log
+.DS_Store
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+.cursor/
