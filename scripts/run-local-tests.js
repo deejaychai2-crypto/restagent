@@ -296,6 +296,101 @@ async function main() {
     );
   }
 
+  // Same sessionId, no callId: multiple open orders require guestName (or orderGuid) — never guess "latest".
+  try {
+    const sharedSess = `sess-shared-${Date.now()}`;
+    const r1 = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        sessionId: sharedSess,
+        restaurantId: "rest_001",
+        guestName: "Ram",
+        guestPhone: "+15550001001",
+        items: [{ menuItemName: "Chicken Dum Biryani", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const r2 = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        sessionId: sharedSess,
+        restaurantId: "rest_001",
+        guestName: "Chris",
+        guestPhone: "+15550001001",
+        items: [{ menuItemName: "Garlic Naan", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const amb = await axios.post(
+      `${baseUrl}/tools/modify_order`,
+      {
+        sessionId: sharedSess,
+        restaurantId: "rest_001",
+        modifyMode: "replace",
+        items: [{ menuItemName: "Lamb Chops", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const modRam = await axios.post(
+      `${baseUrl}/tools/modify_order`,
+      {
+        sessionId: sharedSess,
+        restaurantId: "rest_001",
+        guestName: "Ram",
+        modifyMode: "replace",
+        items: [
+          { menuItemName: "Lamb Chops", quantity: 1 },
+          { menuItemName: "Rasmalai", quantity: 4 },
+        ],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const hub = await axios.get(`${baseUrl}/internal/orders-hub/orders`, { headers, timeout: 10000, validateStatus: () => true });
+    const ramRows = (hub.data?.orders || []).filter((o) => o.sessionId === sharedSess && o.guestName === "Ram");
+    const ramActive = ramRows.find((o) => o.fulfillmentStatus !== "Cancelled" && o.fulfillmentStatus !== "Completed");
+    const chrisStill = (hub.data?.orders || []).find(
+      (o) =>
+        o.sessionId === sharedSess &&
+        o.guestName === "Chris" &&
+        o.fulfillmentStatus !== "Cancelled" &&
+        o.fulfillmentStatus !== "Completed",
+    );
+
+    const ambiguousOk =
+      r1.status === 200 &&
+      r1.data.success === true &&
+      r2.status === 200 &&
+      r2.data.success === true &&
+      amb.status === 200 &&
+      amb.data.success === false &&
+      amb.data.error === "ambiguous_active_orders";
+    const disambigOk =
+      modRam.status === 200 &&
+      modRam.data.success === true &&
+      ramActive &&
+      ramActive.items.some((it) => it.name === "Lamb Chops") &&
+      ramActive.items.some((it) => it.name === "Rasmalai") &&
+      !ramActive.items.some((it) => it.name === "Chicken Dum Biryani") &&
+      chrisStill &&
+      chrisStill.items.some((it) => it.name === "Garlic Naan");
+    results.push({
+      name: "modify-order-shared-session-guestName-disambiguation",
+      pass: ambiguousOk && disambigOk,
+      status: ambiguousOk && disambigOk ? 200 : "assert",
+      data:
+        ambiguousOk && disambigOk
+          ? {}
+          : { r1: r1.data, r2: r2.data, amb: amb.data, modRam: modRam.data, ramActive, chrisStill },
+    });
+  } catch (error) {
+    results.push({
+      name: "modify-order-shared-session-guestName-disambiguation",
+      pass: false,
+      status: "network-error",
+      data: { message: error.message },
+    });
+  }
+
   // Duplicate submit_order with same callId merges guest + schedule into Orders Hub (no second Toast order).
   const mergeCallId = `hub-merge-${Date.now()}`;
   const mergeBase = {

@@ -138,6 +138,22 @@ const modifyOrderSchema = submitOrderBodySchema
     }
   });
 
+/** Tool defaults like "session_123" collide across real calls — treat as non-unique unless we have a real Vapi call id. */
+function isPlaceholderCorrelationId(value) {
+  if (value == null) return true;
+  const s = String(value).trim().toLowerCase();
+  if (!s) return true;
+  if (/^session[_-]?123$/.test(s)) return true;
+  if (/^call[_-]?123$/.test(s)) return true;
+  if (s === "session" || s === "call" || s === "sess_123") return true;
+  return false;
+}
+
+function normalizeGuestKey(name) {
+  if (!name || typeof name !== "string") return "";
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
 /** Flatten common LLM / Vapi shapes so the hub matches what was said on the call. */
 function normalizeSubmitOrderBody(body) {
   if (!body || typeof body !== "object") return body;
@@ -154,8 +170,13 @@ function normalizeSubmitOrderBody(body) {
   if (!next.items && raw.order && Array.isArray(raw.order.items)) next.items = raw.order.items;
 
   const callObj = raw.call && typeof raw.call === "object" ? raw.call : null;
-  if (!next.callId && callObj?.id) next.callId = String(callObj.id);
-  if (!next.sessionId && callObj?.id) next.sessionId = String(callObj.id);
+  const vapiCallId = callObj?.id != null && String(callObj.id).trim() ? String(callObj.id).trim() : null;
+  if (vapiCallId) {
+    if (isPlaceholderCorrelationId(next.sessionId)) next.sessionId = vapiCallId;
+    if (isPlaceholderCorrelationId(next.callId)) next.callId = vapiCallId;
+  }
+  if (!next.callId && vapiCallId) next.callId = vapiCallId;
+  if (!next.sessionId && vapiCallId) next.sessionId = vapiCallId;
   if (!next.guestPhone && (callObj?.from || callObj?.phoneNumber || callObj?.phone)) {
     next.guestPhone = String(callObj.from || callObj.phoneNumber || callObj.phone);
   }
@@ -618,25 +639,39 @@ function hubOrderAmendable(o) {
   return o.fulfillmentStatus !== "Cancelled" && o.fulfillmentStatus !== "Completed";
 }
 
-/** Latest open phone order for this session (optionally narrowed by callId or exact orderGuid). */
-function findAmendableHubOrder({ sessionId, callId, orderGuid }) {
+/**
+ * Resolve which hub row to amend. Never guess "latest" when multiple open orders share sessionId
+ * without a callId — that mis-attributes cancels/modifies across callers who reused tool defaults.
+ */
+function resolveAmendableHubOrder({ sessionId, callId, orderGuid, guestName }) {
   const orders = loadOrdersHubStore();
   const candidates = orders.filter((o) => o.sessionId === sessionId && hubOrderAmendable(o));
   if (orderGuid) {
     const row = candidates.find((o) => o.orderGuid === orderGuid);
-    if (!row) return null;
-    if (callId && row.callId && String(row.callId) !== String(callId)) return null;
-    return row;
+    if (!row) return { ok: false, reason: "not_found" };
+    if (callId && row.callId && String(row.callId) !== String(callId)) return { ok: false, reason: "not_found" };
+    return { ok: true, row };
   }
   if (callId) {
     const matched = candidates.filter((o) => o.callId && String(o.callId) === String(callId));
-    if (matched.length === 0) return null;
+    if (matched.length === 0) return { ok: false, reason: "not_found" };
     matched.sort((a, b) => new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime());
-    return matched[0];
+    return { ok: true, row: matched[0] };
   }
-  if (candidates.length === 0) return null;
-  candidates.sort((a, b) => new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime());
-  return candidates[0];
+
+  let pool = candidates.slice();
+  if (pool.length > 1) {
+    const gk = normalizeGuestKey(guestName);
+    if (gk) {
+      const named = pool.filter((o) => normalizeGuestKey(o.guestName) === gk);
+      if (named.length === 1) return { ok: true, row: named[0] };
+      if (named.length > 1) return { ok: false, reason: "ambiguous" };
+      return { ok: false, reason: "not_found" };
+    }
+    return { ok: false, reason: "ambiguous" };
+  }
+  if (pool.length === 0) return { ok: false, reason: "not_found" };
+  return { ok: true, row: pool[0] };
 }
 
 function clearIdempotencyEntry(idempotencyKey) {
@@ -775,12 +810,27 @@ async function voidToastOrder(orderGuid) {
   }
 }
 
+const AMBIGUOUS_ORDERS_USER_MESSAGE =
+  "More than one open order is tied to this session. Send guestName matching the pickup name on the check, orderGuid from submit_order, or configure tools with Vapi's unique call id for sessionId and callId — the pickup phone in the conversation does not replace those fields in the JSON.";
+
 async function performCancelOrder(payload) {
-  const hubRow = findAmendableHubOrder({
+  const pick = resolveAmendableHubOrder({
     sessionId: payload.sessionId,
     callId: payload.callId,
     orderGuid: payload.orderGuid,
+    guestName: payload.guestName,
   });
+  if (!pick.ok && pick.reason === "ambiguous") {
+    return {
+      status: 200,
+      json: {
+        success: false,
+        error: "ambiguous_active_orders",
+        userMessage: AMBIGUOUS_ORDERS_USER_MESSAGE,
+      },
+    };
+  }
+  const hubRow = pick.ok ? pick.row : null;
   if (!hubRow) {
     return { status: 200, json: { success: false, error: "order_not_found" } };
   }
@@ -1088,6 +1138,7 @@ const hubStatusSchema = z.enum(["Needs Approval", "Scheduled", "Active", "Order 
 const cancelOrderSchema = z.object({
   sessionId: z.string().min(1),
   callId: z.string().optional(),
+  guestName: z.string().max(120).optional(),
   restaurantId: z.string().min(1),
   orderGuid: z.string().optional(),
   reason: z.string().max(240).optional(),
@@ -1181,11 +1232,20 @@ app.post("/tools/modify_order", async (req, res) => {
     return res.status(200).json(invalidToolPayloadBody(parsed.error));
   }
   const payload = parsed.data;
-  const hubRow = findAmendableHubOrder({
+  const pick = resolveAmendableHubOrder({
     sessionId: payload.sessionId,
     callId: payload.callId,
     orderGuid: undefined,
+    guestName: payload.guestName,
   });
+  if (!pick.ok && pick.reason === "ambiguous") {
+    return res.json({
+      success: false,
+      error: "ambiguous_active_orders",
+      userMessage: AMBIGUOUS_ORDERS_USER_MESSAGE,
+    });
+  }
+  const hubRow = pick.ok ? pick.row : null;
   if (!hubRow) {
     return res.json({
       success: false,
@@ -1260,6 +1320,7 @@ app.post("/tools/modify_order", async (req, res) => {
   const cancelOut = await performCancelOrder({
     sessionId: payload.sessionId,
     callId: payload.callId,
+    guestName: payload.guestName,
     restaurantId: payload.restaurantId,
     orderGuid: hubRow.orderGuid,
     reason: "Customer changed the order",
