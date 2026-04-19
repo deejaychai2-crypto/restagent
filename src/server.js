@@ -738,16 +738,141 @@ async function performSubmitOrder(payload) {
 
 app.get("/", (_req, res) => {
   res.type("html").send(`<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/><title>RestVagent</title></head>
-<body style="font-family:system-ui;max-width:42rem;margin:2rem">
-  <h1>RestVagent</h1>
-  <p>API + Orders Hub run in the same process.</p>
-  <ul>
-    <li><a href="/orders-hub/">Orders Hub (dashboard)</a></li>
-    <li><a href="/health/ready">Health</a></li>
-  </ul>
-  <p style="color:#555;font-size:0.9rem">If the hub shows empty tabs, set <code>ORDERS_HUB_ALLOW_NO_AUTH=true</code> in <code>.env</code> for local use, or open <strong>API key</strong> on the hub and paste <code>WEBHOOK_API_KEY</code>.</p>
-</body></html>`);
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>RestVagent</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg-1: #0b1020;
+      --bg-2: #131c33;
+      --card: #131a2a;
+      --card-border: #28324c;
+      --text: #e8edff;
+      --muted: #a7b2d3;
+      --brand: #5ea6ff;
+      --brand-2: #79f0ff;
+      --ok: #1dd1a1;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background: radial-gradient(1200px 600px at 10% -10%, #2a3a68 0%, var(--bg-1) 42%) no-repeat, var(--bg-1);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .card {
+      width: min(860px, 100%);
+      border: 1px solid var(--card-border);
+      background: linear-gradient(180deg, rgba(19,26,42,0.92), rgba(19,26,42,0.86));
+      backdrop-filter: blur(6px);
+      border-radius: 20px;
+      padding: 28px;
+      box-shadow: 0 24px 70px rgba(0,0,0,0.35);
+    }
+    .eyebrow {
+      display: inline-block;
+      font-size: 12px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--brand-2);
+      background: rgba(94,166,255,0.12);
+      border: 1px solid rgba(94,166,255,0.35);
+      border-radius: 999px;
+      padding: 6px 10px;
+      margin-bottom: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 44px);
+      line-height: 1.08;
+      letter-spacing: -0.02em;
+    }
+    p {
+      margin: 12px 0 0;
+      color: var(--muted);
+      max-width: 70ch;
+      line-height: 1.55;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 22px;
+    }
+    .btn {
+      appearance: none;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      padding: 11px 16px;
+      font-weight: 700;
+      font-size: 14px;
+      text-decoration: none;
+      transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+    }
+    .btn:hover { transform: translateY(-1px); }
+    .btn-primary {
+      color: #04152f;
+      background: linear-gradient(135deg, var(--brand-2), var(--brand));
+      box-shadow: 0 10px 24px rgba(94,166,255,0.36);
+    }
+    .btn-secondary {
+      color: var(--text);
+      border-color: var(--card-border);
+      background: rgba(26,34,54,0.75);
+    }
+    .meta {
+      margin-top: 20px;
+      border-top: 1px solid var(--card-border);
+      padding-top: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--ok);
+      display: inline-block;
+      margin-right: 6px;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: rgba(94,166,255,0.12);
+      border: 1px solid rgba(94,166,255,0.24);
+      border-radius: 6px;
+      padding: 1px 6px;
+      color: #cde3ff;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <span class="eyebrow">Voice Ordering + Toast Mirror</span>
+    <h1>RestVagent Demo Console</h1>
+    <p>Orders API and dashboard are running in one process. Use Orders Hub for your live demo view and call-level verification.</p>
+    <div class="actions">
+      <a class="btn btn-primary" href="/orders-hub/">Open Orders Hub</a>
+      <a class="btn btn-secondary" href="/health/ready">Health Check</a>
+    </div>
+    <p>If the hub asks for auth, paste your API key in the hub header. For local-only bypass, set <code>ORDERS_HUB_ALLOW_NO_AUTH=true</code>.</p>
+    <div class="meta">
+      <span><span class="dot"></span>Service online</span>
+      <span>Default quote from <code>QUOTE_MINUTES_TAKEOUT</code></span>
+      <span>Base URL from <code>PUBLIC_BASE_URL</code></span>
+    </div>
+  </main>
+</body>
+</html>`);
 });
 
 app.get("/health/live", (_req, res) => res.json({ ok: true }));

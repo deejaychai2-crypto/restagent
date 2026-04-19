@@ -1,6 +1,6 @@
 const API_KEY_STORAGE = "restvagent_orders_hub_api_key";
 
-const STATUSES = ["Active", "Scheduled", "Order Ready", "Completed", "Needs Approval"];
+const STATUSES = ["Active", "Scheduled", "Order Ready", "Completed", "Needs Approval", "Cancelled"];
 
 let state = {
   orders: [],
@@ -135,7 +135,8 @@ function renderList() {
             <h2>${escapeHtml(o.guestName)}</h2>
             <div class="badges">
               <span class="badge channel">${escapeHtml(o.channel)}</span>
-              ${o.paid ? '<span class="badge paid">Paid</span>' : '<span class="badge not-paid">Not paid</span>'}
+              ${o.fulfillmentStatus === "Cancelled" ? '<span class="badge not-paid">Cancelled</span>' : ""}
+              ${o.paid ? '<span class="badge paid">Paid</span>' : o.fulfillmentStatus !== "Cancelled" ? '<span class="badge not-paid">Not paid</span>' : ""}
             </div>
           </div>
           <div class="meta-line"><strong>${escapeHtml(o.diningOptionLabel)}</strong> · ${escapeHtml(o.guestPhone)}</div>
@@ -209,7 +210,7 @@ function renderDetail() {
       <h2>${escapeHtml(order.guestName)}</h2>
       <div class="badges">
         <span class="badge channel">${escapeHtml(order.channel)}</span>
-        ${order.paid ? '<span class="badge paid">Paid</span>' : '<span class="badge not-paid">Not paid</span>'}
+        ${order.fulfillmentStatus === "Cancelled" ? '<span class="badge not-paid">Cancelled</span>' : order.paid ? '<span class="badge paid">Paid</span>' : '<span class="badge not-paid">Not paid</span>'}
       </div>
     </div>
     <dl class="detail-grid">
@@ -217,10 +218,25 @@ function renderDetail() {
       <dt>Phone</dt><dd>${escapeHtml(order.guestPhone)}</dd>
       <dt>Dining</dt><dd>${escapeHtml(order.diningOptionLabel)} (${escapeHtml(order.diningBehavior)})</dd>
       <dt>Due / quote</dt><dd class="firing ${firing.className}">${escapeHtml(firing.text)}</dd>
+      ${
+        order.scheduledForIso
+          ? `<dt>Scheduled pickup (ISO)</dt><dd style="word-break:break-all;font-size:0.78rem">${escapeHtml(order.scheduledForIso)}</dd>`
+          : ""
+      }
       <dt>Placed</dt><dd>${formatTime(order.placedAt)}</dd>
       <dt>Order GUID</dt><dd style="word-break:break-all;font-size:0.78rem">${escapeHtml(order.orderGuid)}</dd>
       <dt>Call / session</dt><dd style="word-break:break-all;font-size:0.78rem">${escapeHtml(order.callId || "—")} / ${escapeHtml(order.sessionId)}</dd>
       <dt>Mode</dt><dd>${escapeHtml(order.mode)}</dd>
+      ${
+        order.fulfillmentStatus === "Cancelled" && order.cancelledAt
+          ? `<dt>Cancelled</dt><dd>${formatTime(order.cancelledAt)}${order.cancelReason ? ` · ${escapeHtml(order.cancelReason)}` : ""}</dd>`
+          : ""
+      }
+      ${
+        order.replacedByHubOrderId
+          ? `<dt>Replaced by</dt><dd style="word-break:break-all;font-size:0.78rem">Hub ${escapeHtml(order.replacedByHubOrderId)}</dd>`
+          : ""
+      }
     </dl>
     <h3 style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted);margin:0.5rem 0 0">Items</h3>
     <ul class="item-rows">${itemsHtml}</ul>
