@@ -49,6 +49,12 @@ const ORDERS_HUB_ALLOW_NO_AUTH =
   String(process.env.ORDERS_HUB_ALLOW_NO_AUTH || "").toLowerCase() === "true";
 const QUOTE_MINUTES_TAKEOUT = Number(process.env.QUOTE_MINUTES_TAKEOUT || 20);
 const ORDERS_HUB_MAX = Number(process.env.ORDERS_HUB_MAX || 200);
+const ESTIMATE_TAX_RATE_RAW = process.env.ESTIMATE_TAX_RATE_PERCENT ?? process.env.ESTIMATE_TAX_PERCENT ?? "";
+const ESTIMATE_TAX_RATE_PERCENT = (() => {
+  const n = Number(String(ESTIMATE_TAX_RATE_RAW).trim());
+  if (!Number.isFinite(n) || n <= 0 || n > 100) return null;
+  return n;
+})();
 
 const orderItemSchema = z.object({
   toastGuid: z.string().min(1).optional(),
@@ -62,6 +68,23 @@ const getMenuSchema = z.object({
   restaurantId: z.string().min(1),
   nowIso: z.string().optional(),
 });
+
+const estimateCartSchema = z
+  .object({
+    restaurantId: z.string().min(1),
+    items: z.array(orderItemSchema).min(1),
+  })
+  .superRefine((data, ctx) => {
+    data.items.forEach((item, idx) => {
+      if (!item.toastGuid && !item.menuItemName) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Each item needs toastGuid or menuItemName",
+          path: ["items", idx],
+        });
+      }
+    });
+  });
 
 const diningBehaviorSchema = z.enum(["Takeout", "Delivery", "Curbside"]);
 
@@ -957,6 +980,44 @@ async function resolveRequestedItems(payload) {
   return { unavailable, resolved };
 }
 
+function roundMoney(n) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+}
+
+/** Price lines for voice cart totals — same resolution rules as submit_order. */
+async function estimateCartPricing(payload) {
+  const freshMenu = await fetchMenu({ forceFresh: true });
+  const filtered = filterAvailableItems(freshMenu);
+  const unavailable = [];
+  const lines = [];
+  for (const reqItem of payload.items) {
+    const match = findRequestedMenuItem(reqItem, filtered.available);
+    if (!match) {
+      unavailable.push(reqItem.menuItemName || reqItem.toastGuid || "unknown_item");
+    } else {
+      const qty = Number(reqItem.quantity || 1);
+      const unit = roundMoney(Number(match.price || 0));
+      const lineTotal = roundMoney(unit * qty);
+      lines.push({
+        menuItemName: match.name,
+        toastGuid: match.toastGuid,
+        quantity: qty,
+        unitPrice: unit,
+        lineTotal,
+      });
+    }
+  }
+  const subtotal = roundMoney(lines.reduce((s, l) => s + l.lineTotal, 0));
+  let estimatedTax = null;
+  let estimatedTotal = null;
+  if (ESTIMATE_TAX_RATE_PERCENT != null && subtotal > 0) {
+    estimatedTax = roundMoney((subtotal * ESTIMATE_TAX_RATE_PERCENT) / 100);
+    estimatedTotal = roundMoney(subtotal + estimatedTax);
+  }
+  return { unavailable, lines, subtotal, estimatedTax, estimatedTotal };
+}
+
 async function performSubmitOrder(payload) {
   if (!isRestaurantOpen()) {
     return {
@@ -1277,6 +1338,49 @@ app.post("/tools/get_menu", async (req, res) => {
   } catch (error) {
     req.log.error({ error }, "Failed to fetch menu");
     return res.status(503).json({ success: false, error: "menu_unavailable" });
+  }
+});
+
+app.post("/tools/estimate_cart", async (req, res) => {
+  if (!withAuth(req, res)) return;
+  const parsed = estimateCartSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(200).json(invalidToolPayloadBody(parsed.error));
+  }
+  try {
+    const out = await estimateCartPricing(parsed.data);
+    if (out.unavailable.length > 0) {
+      return res.json({
+        success: false,
+        error: "items_unavailable",
+        unavailable: out.unavailable,
+        userMessage: `Some items aren't on the menu right now: ${out.unavailable.join(", ")}.`,
+      });
+    }
+    const payload = {
+      success: true,
+      currency: "USD",
+      lines: out.lines,
+      subtotal: out.subtotal,
+      taxRatePercent: ESTIMATE_TAX_RATE_PERCENT,
+      taxEstimated: ESTIMATE_TAX_RATE_PERCENT != null,
+    };
+    if (out.estimatedTax != null) {
+      payload.estimatedTax = out.estimatedTax;
+      payload.estimatedTotal = out.estimatedTotal;
+      payload.userMessage = `Food about $${out.subtotal.toFixed(2)}, estimated tax about $${out.estimatedTax.toFixed(2)} (${ESTIMATE_TAX_RATE_PERCENT}%), total about $${out.estimatedTotal.toFixed(2)}. Final amount on receipt at pickup.`;
+    } else {
+      payload.userMessage = `Food subtotal about $${out.subtotal.toFixed(2)}. Sales tax and final total are on your receipt at pickup.`;
+    }
+    return res.json(payload);
+  } catch (error) {
+    req.log.error({ error }, "Failed to estimate cart");
+    return res.status(503).json({
+      success: false,
+      error: "estimate_failed",
+      retryable: true,
+      userMessage: "Sorry, we couldn't price that right now. Please try again.",
+    });
   }
 });
 

@@ -24,6 +24,33 @@ const cases = [
     expectSuccess: true,
   },
   {
+    name: "estimate-cart-subtotal",
+    method: "post",
+    path: "/tools/estimate_cart",
+    payload: {
+      restaurantId: "rest_001",
+      items: [
+        { menuItemName: "Chicken Dum Biryani", quantity: 1 },
+        { menuItemName: "Samosa", quantity: 2 },
+      ],
+    },
+    expectStatus: 200,
+    expectSuccess: true,
+    expectSubtotal: 17 + 7.99 * 2,
+  },
+  {
+    name: "estimate-cart-unknown-item",
+    method: "post",
+    path: "/tools/estimate_cart",
+    payload: {
+      restaurantId: "rest_001",
+      items: [{ menuItemName: "Dragon Pizza", quantity: 1 }],
+    },
+    expectStatus: 200,
+    expectSuccess: false,
+    expectError: "items_unavailable",
+  },
+  {
     name: "restaurant-closed",
     method: "post",
     path: "/tools/get_menu",
@@ -138,8 +165,12 @@ async function runCase(testCase) {
         : true;
     const errorOk =
       typeof testCase.expectError === "string" ? response.data.error === testCase.expectError : true;
+    const subtotalOk =
+      typeof testCase.expectSubtotal === "number"
+        ? response.data.success === true && Math.abs(Number(response.data.subtotal) - testCase.expectSubtotal) < 0.02
+        : true;
 
-    const pass = statusOk && successOk && duplicateOk && errorOk;
+    const pass = statusOk && successOk && duplicateOk && errorOk && subtotalOk;
     return {
       name: testCase.name,
       pass,
