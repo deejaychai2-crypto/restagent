@@ -239,6 +239,18 @@ function renderDetail() {
       <dt>Order GUID</dt><dd style="word-break:break-all;font-size:0.78rem">${escapeHtml(order.orderGuid)}</dd>
       <dt>Call / session</dt><dd style="word-break:break-all;font-size:0.78rem">${escapeHtml(order.callId || "—")} / ${escapeHtml(order.sessionId)}</dd>
       <dt>Mode</dt><dd>${escapeHtml(order.mode)}</dd>
+      <dt class="sr-only">Edit</dt><dd style="margin:0;padding:0;border:none">
+        <div class="guest-edit-block">
+          <p class="guest-edit-hint">Fix STT or caller-ID mixups (does not change Toast test orders).</p>
+          <label class="guest-edit-label">Guest on check
+            <input type="text" class="guest-edit-input" id="editGuestName" maxlength="120" value="${escapeHtml(order.guestName)}" autocomplete="name" />
+          </label>
+          <label class="guest-edit-label">Phone
+            <input type="text" class="guest-edit-input" id="editGuestPhone" maxlength="40" value="${escapeHtml(order.guestPhone)}" autocomplete="tel" />
+          </label>
+          <button type="button" class="btn secondary" data-action="save-guest">Save guest / phone</button>
+        </div>
+      </dd>
       ${
         order.fulfillmentStatus === "Cancelled" && order.cancelledAt
           ? `<dt>Cancelled</dt><dd>${formatTime(order.cancelledAt)}${order.cancelReason ? ` · ${escapeHtml(order.cancelReason)}` : ""}</dd>`
@@ -263,9 +275,31 @@ function renderDetail() {
   panel.querySelectorAll("[data-action]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       const action = e.currentTarget.getAttribute("data-action");
+      if (action === "save-guest") {
+        saveGuestEdits(order, panel);
+        return;
+      }
       runAction(order, action);
     });
   });
+}
+
+async function saveGuestEdits(order, panel) {
+  const gn = (panel.querySelector("#editGuestName")?.value ?? "").trim();
+  const gp = (panel.querySelector("#editGuestPhone")?.value ?? "").trim();
+  const body = {};
+  if (gn) body.guestName = gn;
+  if (gp) body.guestPhone = gp;
+  if (Object.keys(body).length === 0) {
+    alert("Change the guest name and/or phone, then save.");
+    return;
+  }
+  try {
+    await patchOrder(order.hubOrderId, body);
+    await load();
+  } catch (err) {
+    alert(err.message || String(err));
+  }
 }
 
 async function runAction(order, action) {

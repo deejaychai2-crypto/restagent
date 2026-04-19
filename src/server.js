@@ -161,16 +161,59 @@ const modifyOrderSchema = submitOrderBodySchema
     }
   });
 
+/** Vapi variable syntax copied literally by the model instead of substituted by the platform. */
+function isVapiTemplateCorrelationId(value) {
+  if (value == null) return false;
+  const s = String(value).trim();
+  if (!s) return false;
+  return (
+    /^\{\{\s*call\.id\s*\}\}$/i.test(s) ||
+    /^\{\{\s*session\.id\s*\}\}$/i.test(s) ||
+    /^\{\{\s*callid\s*\}\}$/i.test(s) ||
+    /^\{\{\s*sessionid\s*\}\}$/i.test(s)
+  );
+}
+
 /** Tool defaults like "session_123" collide across real calls — treat as non-unique unless we have a real Vapi call id. */
 function isPlaceholderCorrelationId(value) {
   if (value == null) return true;
   const s = String(value).trim().toLowerCase();
   if (!s) return true;
+  if (isVapiTemplateCorrelationId(value)) return true;
   if (/^session[_-]?123$/.test(s)) return true;
   if (/^call[_-]?123$/.test(s)) return true;
   if (/^session[_-]?00?1$/.test(s)) return true;
   if (/^call[_-]?00?1$/.test(s)) return true;
   if (s === "session" || s === "call" || s === "sess_123") return true;
+  return false;
+}
+
+/** LLM filler that must not block better fields from `pickupName` / caller phone. */
+function isToolPlaceholderGuestString(value) {
+  if (value == null) return true;
+  const s = String(value).trim();
+  if (!s) return true;
+  const lower = s.toLowerCase();
+  const junk = new Set([
+    "temp",
+    "temporary",
+    "tbd",
+    "todo",
+    "test",
+    "testing",
+    "n/a",
+    "none",
+    "unknown",
+    "placeholder",
+    "string",
+    "xxx",
+    "xxxx",
+    "null",
+    "undefined",
+  ]);
+  if (junk.has(lower)) return true;
+  const digits = s.replace(/\D/g, "");
+  if (digits.length > 0 && digits.length < 10 && /^[\d\s\-()+.]+$/.test(s)) return true;
   return false;
 }
 
@@ -207,10 +250,27 @@ function normalizeSubmitOrderBody(body) {
   if (next.callId != null && String(next.callId).trim() === "") {
     delete next.callId;
   }
+  if (next.sessionId != null && String(next.sessionId).trim() === "") {
+    delete next.sessionId;
+  }
+  if (isToolPlaceholderGuestString(next.guestName)) delete next.guestName;
+  if (isToolPlaceholderGuestString(next.guestPhone)) delete next.guestPhone;
   if (!next.items && raw.order && Array.isArray(raw.order.items)) next.items = raw.order.items;
 
   const callObj = raw.call && typeof raw.call === "object" ? raw.call : null;
-  const vapiCallId = callObj?.id != null && String(callObj.id).trim() ? String(callObj.id).trim() : null;
+  const messageCall =
+    raw.message && typeof raw.message === "object" && raw.message.call && typeof raw.message.call === "object"
+      ? raw.message.call
+      : null;
+  let vapiCallId =
+    callObj?.id != null && String(callObj.id).trim()
+      ? String(callObj.id).trim()
+      : messageCall?.id != null && String(messageCall.id).trim()
+        ? String(messageCall.id).trim()
+        : null;
+  if (!vapiCallId && typeof raw.call === "string" && raw.call.trim() && !isVapiTemplateCorrelationId(raw.call)) {
+    vapiCallId = raw.call.trim();
+  }
   if (vapiCallId) {
     if (isPlaceholderCorrelationId(next.sessionId)) next.sessionId = vapiCallId;
     if (isPlaceholderCorrelationId(next.callId)) next.callId = vapiCallId;
@@ -220,20 +280,22 @@ function normalizeSubmitOrderBody(body) {
   if (!next.guestPhone && (callObj?.from || callObj?.phoneNumber || callObj?.phone)) {
     next.guestPhone = String(callObj.from || callObj.phoneNumber || callObj.phone);
   }
-  if (!next.guestName && callObj?.customer && typeof callObj.customer === "object" && callObj.customer?.name) {
-    next.guestName = String(callObj.customer.name);
-  }
 
   const cust = raw.customer && typeof raw.customer === "object" ? raw.customer : null;
-  if (!next.guestName && cust?.name) next.guestName = String(cust.name);
   if (!next.guestPhone && (cust?.phone || cust?.phoneNumber)) {
     next.guestPhone = String(cust.phone || cust.phoneNumber);
   }
 
+  // Pickup name: explicit tool / payload fields must beat carrier / CRM caller-id name (e.g. Kris
+  // in pickupName vs "Chris" from phone book).
   if (!next.guestName && raw.customerName) next.guestName = String(raw.customerName);
   if (!next.guestName && raw.pickupName) next.guestName = String(raw.pickupName);
   if (!next.guestName && raw.callerName) next.guestName = String(raw.callerName);
   if (!next.guestName && raw.name) next.guestName = String(raw.name);
+  if (!next.guestName && cust?.name) next.guestName = String(cust.name);
+  if (!next.guestName && callObj?.customer && typeof callObj.customer === "object" && callObj.customer?.name) {
+    next.guestName = String(callObj.customer.name);
+  }
   if (!next.guestPhone && raw.customerPhone) next.guestPhone = String(raw.customerPhone);
   if (!next.guestPhone && raw.phone) next.guestPhone = String(raw.phone);
   if (!next.guestPhone && raw.phoneNumber) next.guestPhone = String(raw.phoneNumber);
@@ -268,6 +330,22 @@ function normalizeSubmitOrderBody(body) {
   if (!next.removeItems && Array.isArray(raw.removedItems)) next.removeItems = raw.removedItems;
   if (!next.removeItems && Array.isArray(raw.itemsToRemove)) next.removeItems = raw.itemsToRemove;
 
+  if (isVapiTemplateCorrelationId(next.callId)) {
+    delete next.callId;
+  }
+
+  const sidRaw = next.sessionId;
+  const sessionNeedsFallback =
+    sidRaw == null ||
+    String(sidRaw).trim() === "" ||
+    isPlaceholderCorrelationId(sidRaw) ||
+    isVapiTemplateCorrelationId(sidRaw);
+  if (sessionNeedsFallback) {
+    const pk = normalizePhoneKey(next.guestPhone);
+    const phoneOk = pk && !isToolPlaceholderGuestString(next.guestPhone);
+    next.sessionId = phoneOk ? `ph_${pk}` : `voice_${crypto.randomUUID()}`;
+  }
+
   return next;
 }
 
@@ -276,19 +354,42 @@ function normalizeSubmitOrderBody(body) {
  * surface the JSON body to the model. Return 200 + success:false so the assistant can read
  * userMessage and details.
  */
-function invalidToolPayloadBody(zodError) {
+const INVALID_TOOL_PAYLOAD_META = {
+  get_menu: {
+    opener: "We couldn't load the menu:",
+    hint: "Send restaurantId (optional nowIso).",
+  },
+  estimate_cart: {
+    opener: "We couldn't price the cart:",
+    hint: "estimate_cart needs only restaurantId and items; each item needs toastGuid or menuItemName from get_menu. Do not send sessionId for pricing.",
+  },
+  submit_order: {
+    opener: "We couldn't place that yet:",
+    hint: "Confirm sessionId, callId, restaurantId, guest name, phone, and each item has toastGuid or menuItemName.",
+  },
+  cancel_order: {
+    opener: "We couldn't cancel that yet:",
+    hint: "Confirm sessionId, restaurantId, and matching callId or guest fields per cancel_order docs.",
+  },
+  modify_order: {
+    opener: "We couldn't update that yet:",
+    hint: "Confirm sessionId, restaurantId, guest fields, and each item has toastGuid or menuItemName.",
+  },
+};
+
+function invalidToolPayloadBody(zodError, toolName = "submit_order") {
   const issues = zodError?.issues || [];
   const first = issues[0];
   const pathStr = first?.path?.length ? first.path.map(String).join(".") : "request";
   const msg = first?.message || "validation failed";
-  let hint =
-    "Confirm sessionId, callId, restaurantId, guest name, phone, and each item has toastGuid or menuItemName.";
+  const meta = INVALID_TOOL_PAYLOAD_META[toolName] || INVALID_TOOL_PAYLOAD_META.submit_order;
+  let hint = meta.hint;
   const combined = `${pathStr} ${msg}`.toLowerCase();
   if (combined.includes("scheduled") || combined.includes("datetime") || combined.includes("offset")) {
     hint =
       "scheduledForIso must be full ISO-8601 with a real timezone offset (e.g. 2026-04-19T17:00:00-04:00). Omit it only for ASAP pickup.";
   }
-  const userMessage = `We could not place that yet: ${pathStr} — ${msg}. ${hint}`.slice(0, 500);
+  const userMessage = `${meta.opener} ${pathStr} — ${msg}. ${hint}`.slice(0, 500);
   return { success: false, error: "invalid_payload", details: issues, userMessage };
 }
 
@@ -985,6 +1086,17 @@ function roundMoney(n) {
   return Math.round(n * 100) / 100;
 }
 
+/** Spoken-friendly amounts so TTS does not read "$20.19" as "twenty nineteen" (misheard as "hello 2019"). */
+function formatMoneyForVoice(amount) {
+  const n = roundMoney(amount);
+  if (!Number.isFinite(n) || n < 0) return "zero dollars";
+  const whole = Math.floor(n + 1e-9);
+  const cents = Math.round((n - whole) * 100 + 1e-9) % 100;
+  const dWord = whole === 1 ? "dollar" : "dollars";
+  if (cents === 0) return `${whole} ${dWord}`;
+  return `${whole} ${dWord} and ${cents} cents`;
+}
+
 /** Price lines for voice cart totals — same resolution rules as submit_order. */
 async function estimateCartPricing(payload) {
   const freshMenu = await fetchMenu({ forceFresh: true });
@@ -1295,6 +1407,8 @@ app.patch("/internal/orders-hub/orders/:hubOrderId", (req, res) => {
     fulfillmentStatus: hubStatusSchema.optional(),
     unread: z.boolean().optional(),
     paid: z.boolean().optional(),
+    guestName: z.string().max(120).optional(),
+    guestPhone: z.string().max(40).optional(),
   });
   const parsed = bodySchema.safeParse(req.body || {});
   if (!parsed.success) {
@@ -1307,6 +1421,14 @@ app.patch("/internal/orders-hub/orders/:hubOrderId", (req, res) => {
   if (parsed.data.fulfillmentStatus !== undefined) next.fulfillmentStatus = parsed.data.fulfillmentStatus;
   if (parsed.data.unread !== undefined) next.unread = parsed.data.unread;
   if (parsed.data.paid !== undefined) next.paid = parsed.data.paid;
+  if (parsed.data.guestName !== undefined) {
+    const g = String(parsed.data.guestName).trim();
+    next.guestName = g || next.guestName;
+  }
+  if (parsed.data.guestPhone !== undefined) {
+    const p = String(parsed.data.guestPhone).trim();
+    next.guestPhone = p || next.guestPhone;
+  }
   orders[idx] = next;
   saveOrdersHubStore(orders);
   return res.json({ success: true, order: next });
@@ -1315,7 +1437,7 @@ app.patch("/internal/orders-hub/orders/:hubOrderId", (req, res) => {
 app.post("/tools/get_menu", async (req, res) => {
   if (!withAuth(req, res)) return;
   const parsed = getMenuSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(200).json(invalidToolPayloadBody(parsed.error));
+  if (!parsed.success) return res.status(200).json(invalidToolPayloadBody(parsed.error, "get_menu"));
 
   const { nowIso } = parsed.data;
   if (!isRestaurantOpen(nowIso)) {
@@ -1345,7 +1467,7 @@ app.post("/tools/estimate_cart", async (req, res) => {
   if (!withAuth(req, res)) return;
   const parsed = estimateCartSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(200).json(invalidToolPayloadBody(parsed.error));
+    return res.status(200).json(invalidToolPayloadBody(parsed.error, "estimate_cart"));
   }
   try {
     const out = await estimateCartPricing(parsed.data);
@@ -1368,9 +1490,11 @@ app.post("/tools/estimate_cart", async (req, res) => {
     if (out.estimatedTax != null) {
       payload.estimatedTax = out.estimatedTax;
       payload.estimatedTotal = out.estimatedTotal;
-      payload.userMessage = `Food about $${out.subtotal.toFixed(2)}, estimated tax about $${out.estimatedTax.toFixed(2)} (${ESTIMATE_TAX_RATE_PERCENT}%), total about $${out.estimatedTotal.toFixed(2)}. Final amount on receipt at pickup.`;
+      payload.userMessage = `Food runs about ${formatMoneyForVoice(out.subtotal)}, estimated sales tax about ${formatMoneyForVoice(
+        out.estimatedTax,
+      )}, total about ${formatMoneyForVoice(out.estimatedTotal)}. Final amount on your receipt at pickup.`;
     } else {
-      payload.userMessage = `Food subtotal about $${out.subtotal.toFixed(2)}. Sales tax and final total are on your receipt at pickup.`;
+      payload.userMessage = `Food subtotal about ${formatMoneyForVoice(out.subtotal)}. Sales tax and final total are on your receipt at pickup.`;
     }
     return res.json(payload);
   } catch (error) {
@@ -1388,7 +1512,7 @@ app.post("/tools/submit_order", async (req, res) => {
   if (!withAuth(req, res)) return;
   const parsed = submitOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
   if (!parsed.success) {
-    return res.status(200).json(invalidToolPayloadBody(parsed.error));
+    return res.status(200).json(invalidToolPayloadBody(parsed.error, "submit_order"));
   }
   const out = await performSubmitOrder(parsed.data);
   return res.status(out.status).json(out.json);
@@ -1398,7 +1522,7 @@ app.post("/tools/cancel_order", async (req, res) => {
   if (!withAuth(req, res)) return;
   const parsed = cancelOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
   if (!parsed.success) {
-    return res.status(200).json(invalidToolPayloadBody(parsed.error));
+    return res.status(200).json(invalidToolPayloadBody(parsed.error, "cancel_order"));
   }
   const out = await performCancelOrder(parsed.data);
   return res.status(out.status).json(out.json);
@@ -1408,7 +1532,7 @@ app.post("/tools/modify_order", async (req, res) => {
   if (!withAuth(req, res)) return;
   const parsed = modifyOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
   if (!parsed.success) {
-    return res.status(200).json(invalidToolPayloadBody(parsed.error));
+    return res.status(200).json(invalidToolPayloadBody(parsed.error, "modify_order"));
   }
   const payload = parsed.data;
   const pick = resolveAmendableHubOrder({
@@ -1574,7 +1698,7 @@ app.post("/webhooks/vapi/order", async (req, res) => {
   };
   const parsed = submitOrderSchema.safeParse(payload);
   if (!parsed.success) {
-    return res.status(200).json(invalidToolPayloadBody(parsed.error));
+    return res.status(200).json(invalidToolPayloadBody(parsed.error, "submit_order"));
   }
   return processSubmitOrder(req, res, parsed.data);
 });
@@ -1603,4 +1727,10 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { app, start, isRestaurantOpen, filterAvailableItems };
+module.exports = {
+  app,
+  start,
+  isRestaurantOpen,
+  filterAvailableItems,
+  normalizeSubmitOrderBody,
+};

@@ -4,7 +4,7 @@ const axios = require("axios");
 if (!process.env.BASE_URL) {
   process.env.PORT = String(18000 + Math.floor(Math.random() * 15000));
 }
-const { start } = require("../src/server");
+const { start, normalizeSubmitOrderBody } = require("../src/server");
 
 const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT}`;
 const apiKey = process.env.WEBHOOK_API_KEY || "";
@@ -49,6 +49,18 @@ const cases = [
     expectStatus: 200,
     expectSuccess: false,
     expectError: "items_unavailable",
+  },
+  {
+    name: "estimate-cart-invalid-no-restaurant",
+    method: "post",
+    path: "/tools/estimate_cart",
+    payload: {
+      items: [{ menuItemName: "Samosa", quantity: 1 }],
+    },
+    expectStatus: 200,
+    expectSuccess: false,
+    expectError: "invalid_payload",
+    expectUserMessageIncludes: "price the cart",
   },
   {
     name: "restaurant-closed",
@@ -169,8 +181,14 @@ async function runCase(testCase) {
       typeof testCase.expectSubtotal === "number"
         ? response.data.success === true && Math.abs(Number(response.data.subtotal) - testCase.expectSubtotal) < 0.02
         : true;
+    const userMsgOk =
+      typeof testCase.expectUserMessageIncludes === "string"
+        ? String(response.data.userMessage || "")
+            .toLowerCase()
+            .includes(testCase.expectUserMessageIncludes.toLowerCase())
+        : true;
 
-    const pass = statusOk && successOk && duplicateOk && errorOk && subtotalOk;
+    const pass = statusOk && successOk && duplicateOk && errorOk && subtotalOk && userMsgOk;
     return {
       name: testCase.name,
       pass,
@@ -188,8 +206,78 @@ async function runCase(testCase) {
 }
 
 async function main() {
+  const normTemplateWithCall = normalizeSubmitOrderBody({
+    sessionId: "{{session.id}}",
+    callId: "{{call.id}}",
+    call: { id: "vapi-call-replace-01" },
+    restaurantId: "rest_001",
+    guestPhone: "+12347890198",
+    items: [{ menuItemName: "Garlic Naan", quantity: 1 }],
+  });
+  const normTemplatePhoneOnly = normalizeSubmitOrderBody({
+    sessionId: "{{ session.id }}",
+    callId: "{{ call.id }}",
+    restaurantId: "rest_001",
+    guestPhone: "+1 (234) 789-0198",
+    items: [{ menuItemName: "Garlic Naan", quantity: 1 }],
+  });
+  const normTemplateNoPhone = normalizeSubmitOrderBody({
+    sessionId: "{{session.id}}",
+    callId: "{{call.id}}",
+    restaurantId: "rest_001",
+    guestName: "Guest",
+    items: [{ menuItemName: "Garlic Naan", quantity: 1 }],
+  });
+  const normalizeTemplateOk =
+    normTemplateWithCall.sessionId === "vapi-call-replace-01" &&
+    normTemplateWithCall.callId === "vapi-call-replace-01" &&
+    normTemplatePhoneOnly.sessionId === "ph_2347890198" &&
+    normTemplatePhoneOnly.callId == null &&
+    normTemplateNoPhone.sessionId.startsWith("voice_") &&
+    normTemplateNoPhone.callId == null;
+
+  const normEmptySessionTempGuest = normalizeSubmitOrderBody({
+    restaurantId: "rest_001",
+    guestName: "temp",
+    pickupName: "Kris",
+    guestPhone: "4352347810",
+    items: [{ menuItemName: "Garlic Naan", quantity: 1 }],
+  });
+  const normBlankSessionId = normalizeSubmitOrderBody({
+    sessionId: "",
+    restaurantId: "rest_001",
+    guestPhone: "+1 (234) 789-0198",
+    guestName: "Pat",
+    items: [{ menuItemName: "Garlic Naan", quantity: 1 }],
+  });
+  const normalizeFallbackOk =
+    normEmptySessionTempGuest.sessionId === "ph_4352347810" &&
+    normEmptySessionTempGuest.guestName === "Kris" &&
+    normBlankSessionId.sessionId === "ph_2347890198";
+
   const server = start();
   const results = [];
+  if (!normalizeTemplateOk) {
+    results.push({
+      name: "normalize-submit-order-vapi-templates",
+      pass: false,
+      status: "assert",
+      data: { normTemplateWithCall, normTemplatePhoneOnly, normTemplateNoPhone },
+    });
+  } else {
+    results.push({ name: "normalize-submit-order-vapi-templates", pass: true, status: 200, data: {} });
+  }
+  if (!normalizeFallbackOk) {
+    results.push({
+      name: "normalize-submit-order-session-fallback",
+      pass: false,
+      status: "assert",
+      data: { normEmptySessionTempGuest, normBlankSessionId },
+    });
+  } else {
+    results.push({ name: "normalize-submit-order-session-fallback", pass: true, status: 200, data: {} });
+  }
+
   for (const testCase of cases) {
     results.push(await runCase(testCase));
   }
