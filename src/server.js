@@ -65,6 +65,9 @@ const getMenuSchema = z.object({
 
 const diningBehaviorSchema = z.enum(["Takeout", "Delivery", "Curbside"]);
 
+/** Only used by modify_order; submit_order ignores it. merge = keep old items + new; replace = cart is only items in this request. */
+const modifyModeSchema = z.enum(["merge", "replace"]).optional();
+
 const submitOrderSchema = z
   .object({
     sessionId: z.string().min(1),
@@ -76,6 +79,7 @@ const submitOrderSchema = z
     diningBehavior: diningBehaviorSchema.optional().default("Takeout"),
     // Require offset when provided, so "5 pm" doesn't silently become ASAP fallback.
     scheduledForIso: z.string().datetime({ offset: true }).optional(),
+    modifyMode: modifyModeSchema,
   })
   .superRefine((data, ctx) => {
     data.items.forEach((item, idx) => {
@@ -135,6 +139,16 @@ function normalizeSubmitOrderBody(body) {
     raw.pickupAtIso;
   if (!next.scheduledForIso && schedRaw != null && schedRaw !== "") {
     next.scheduledForIso = typeof schedRaw === "string" ? schedRaw : String(schedRaw);
+  }
+
+  const modeRaw = raw.modifyMode ?? raw.modify_order_mode ?? raw.cartMode;
+  if (next.modifyMode == null && modeRaw != null && modeRaw !== "") {
+    const s = String(modeRaw).trim().toLowerCase();
+    if (["replace", "new", "fresh", "only", "replace_cart"].includes(s)) next.modifyMode = "replace";
+    if (["merge", "add", "additive", "append"].includes(s)) next.modifyMode = "merge";
+  }
+  if (next.modifyMode == null && (raw.replaceExistingItems === true || raw.cartReplacement === true)) {
+    next.modifyMode = "replace";
   }
 
   return next;
@@ -574,6 +588,57 @@ function markHubOrderCancelled(hubOrderId, { reason } = {}) {
   });
 }
 
+function normalizeItemKey(item) {
+  if (item.toastGuid && String(item.toastGuid).trim()) return `guid:${String(item.toastGuid).trim()}`;
+  if (item.menuItemName && String(item.menuItemName).trim()) return `name:${String(item.menuItemName).trim().toLowerCase()}`;
+  if (item.name && String(item.name).trim()) return `name:${String(item.name).trim().toLowerCase()}`;
+  return `fallback:${crypto.randomUUID()}`;
+}
+
+function hubItemsToRequestItems(hubItems) {
+  if (!Array.isArray(hubItems)) return [];
+  return hubItems
+    .map((item) => {
+      const quantity = Number(item.quantity || 0);
+      const menuItemName = item.name && String(item.name).trim() ? String(item.name).trim() : undefined;
+      const toastGuid = item.toastGuid && String(item.toastGuid).trim() ? String(item.toastGuid).trim() : undefined;
+      if (quantity <= 0 || (!menuItemName && !toastGuid)) return null;
+      return {
+        toastGuid,
+        menuItemName,
+        quantity,
+        specialInstructions:
+          item.specialInstructions && String(item.specialInstructions).trim()
+            ? String(item.specialInstructions).trim()
+            : undefined,
+      };
+    })
+    .filter(Boolean);
+}
+
+/** modify_order merge mode: keep existing items and add requested items on top (same line merges qty). */
+function buildMergedModifyItems(existingItems, requestedItems) {
+  const mergedMap = new Map();
+  const orderedKeys = [];
+  const pushOrMerge = (item) => {
+    if (!item) return;
+    const key = normalizeItemKey(item);
+    const qty = Number(item.quantity || 0);
+    if (qty <= 0) return;
+    if (!mergedMap.has(key)) {
+      mergedMap.set(key, { ...item, quantity: qty });
+      orderedKeys.push(key);
+      return;
+    }
+    const prior = mergedMap.get(key);
+    mergedMap.set(key, { ...prior, quantity: Number(prior.quantity || 0) + qty });
+  };
+
+  for (const item of existingItems) pushOrMerge(item);
+  for (const item of requestedItems) pushOrMerge(item);
+  return orderedKeys.map((k) => mergedMap.get(k));
+}
+
 /** Toast void requires orders.channel:void scope and OTHER tender on the check; see Toast docs. */
 async function voidToastOrder(orderGuid) {
   if (!orderGuid || orderGuid === "unknown") return { ok: true, skipped: true };
@@ -642,6 +707,22 @@ async function performCancelOrder(payload) {
   };
 }
 
+async function resolveRequestedItems(payload) {
+  const freshMenu = await fetchMenu({ forceFresh: true });
+  const filtered = filterAvailableItems(freshMenu);
+  const unavailable = [];
+  const resolved = [];
+  for (const reqItem of payload.items) {
+    const match = findRequestedMenuItem(reqItem, filtered.available);
+    if (!match) {
+      unavailable.push(reqItem.menuItemName || reqItem.toastGuid || "unknown_item");
+    } else {
+      resolved.push({ ...reqItem, toastGuid: match.toastGuid, menuItemName: match.name });
+    }
+  }
+  return { unavailable, resolved };
+}
+
 async function performSubmitOrder(payload) {
   if (!isRestaurantOpen()) {
     return {
@@ -671,19 +752,7 @@ async function performSubmitOrder(payload) {
   }
 
   try {
-    const freshMenu = await fetchMenu({ forceFresh: true });
-    const filtered = filterAvailableItems(freshMenu);
-    const unavailable = [];
-    const resolved = [];
-    for (const reqItem of payload.items) {
-      const match = findRequestedMenuItem(reqItem, filtered.available);
-      if (!match) {
-        unavailable.push(reqItem.menuItemName || reqItem.toastGuid || "unknown_item");
-      } else {
-        resolved.push({ ...reqItem, toastGuid: match.toastGuid, menuItemName: match.name });
-      }
-    }
-
+    const { unavailable, resolved } = await resolveRequestedItems(payload);
     if (unavailable.length > 0) {
       return {
         status: 200,
@@ -1012,6 +1081,35 @@ app.post("/tools/modify_order", async (req, res) => {
     });
   }
 
+  const modifyMode = payload.modifyMode === "replace" ? "replace" : "merge";
+  const existingReqItems = hubItemsToRequestItems(hubRow.items);
+  const nextItems =
+    modifyMode === "replace" ? payload.items : buildMergedModifyItems(existingReqItems, payload.items);
+  const { modifyMode: _omitModifyMode, ...payloadForSubmit } = payload;
+  const mergedPayload = { ...payloadForSubmit, items: nextItems };
+
+  // Validate/resolve replacement first so we never cancel an order unless the new one is placeable.
+  let preflight;
+  try {
+    preflight = await resolveRequestedItems(mergedPayload);
+  } catch (error) {
+    req.log.error({ error }, "Failed preflight for modify_order");
+    return res.status(503).json({
+      success: false,
+      error: "submission_failed",
+      retryable: true,
+      userMessage: "Sorry, we could not validate the updated order right now. Please try again.",
+    });
+  }
+  if (preflight.unavailable.length > 0) {
+    return res.json({
+      success: false,
+      error: "items_unavailable",
+      unavailable: preflight.unavailable,
+      available: preflight.resolved.map((x) => x.menuItemName),
+    });
+  }
+
   const cancelOut = await performCancelOrder({
     sessionId: payload.sessionId,
     callId: payload.callId,
@@ -1023,12 +1121,13 @@ app.post("/tools/modify_order", async (req, res) => {
     return res.status(cancelOut.status).json(cancelOut.json);
   }
 
-  const submitOut = await performSubmitOrder(payload);
+  const submitOut = await performSubmitOrder(mergedPayload);
   if (submitOut.json.success && submitOut.json.hubOrderId) {
     patchHubOrderById(hubRow.hubOrderId, { replacedByHubOrderId: submitOut.json.hubOrderId });
   }
   return res.status(submitOut.status).json({
     ...submitOut.json,
+    modifyMode,
     replacedPreviousHubOrderId: hubRow.hubOrderId,
     replacedPreviousOrderGuid: hubRow.orderGuid,
   });

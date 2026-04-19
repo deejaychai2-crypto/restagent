@@ -94,6 +94,20 @@ function matchesSearch(o, q) {
   );
 }
 
+function currentVisibleOrders() {
+  return state.orders.filter((o) => o.fulfillmentStatus === state.tab && matchesSearch(o, state.search));
+}
+
+function syncSelectionToVisibleOrders() {
+  const visible = currentVisibleOrders();
+  if (visible.length === 0) {
+    state.selectedId = null;
+    return;
+  }
+  const stillVisible = visible.some((o) => o.hubOrderId === state.selectedId);
+  if (!stillVisible) state.selectedId = visible[0].hubOrderId;
+}
+
 function renderTabs() {
   const { c, unreadActive } = countByTab(state.orders);
   const el = document.getElementById("tabBar");
@@ -114,9 +128,7 @@ function renderTabs() {
 
 function renderList() {
   const list = document.getElementById("orderList");
-  const filtered = state.orders.filter(
-    (o) => o.fulfillmentStatus === state.tab && matchesSearch(o, state.search),
-  );
+  const filtered = currentVisibleOrders();
 
   if (filtered.length === 0) {
     list.innerHTML = `<p class="empty-detail">No orders in <strong>${state.tab}</strong> for this filter.</p>`;
@@ -275,6 +287,7 @@ async function runAction(order, action) {
 
 function render() {
   document.getElementById("quoteLabel").textContent = `${state.quoteMinutes} min`;
+  syncSelectionToVisibleOrders();
   renderTabs();
   renderList();
   renderDetail();
