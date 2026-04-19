@@ -788,6 +788,39 @@ function buildMergedModifyItems(existingItems, requestedItems) {
   return orderedKeys.map((k) => mergedMap.get(k));
 }
 
+/**
+ * Same resolved lines (guid/name, qty, special instructions) — merge would only duplicate quantities.
+ * Used when the model re-sends the cart on a pickup name/phone fix in the same call.
+ */
+function resolvedCartsIdenticalForMergeGuard(existing, incomingResolved) {
+  const norm = (item) => ({
+    k: normalizeItemKey(item),
+    q: Number(item.quantity || 0),
+    si: (item.specialInstructions && String(item.specialInstructions).trim()) || "",
+  });
+  const sa = [...incomingResolved].map(norm).sort((a, b) => a.k.localeCompare(b.k));
+  const sb = [...existing].map(norm).sort((a, b) => a.k.localeCompare(b.k));
+  if (sa.length !== sb.length) return false;
+  for (let i = 0; i < sa.length; i++) {
+    if (sa[i].k !== sb[i].k || sa[i].q !== sb[i].q || sa[i].si !== sb[i].si) return false;
+  }
+  return true;
+}
+
+function hubGuestScheduleMetadataChanged(payload, hubRow) {
+  const gn = normalizeGuestKey(payload.guestName);
+  const hn = normalizeGuestKey(hubRow.guestName);
+  const nameChanged =
+    Boolean(payload.guestName != null && String(payload.guestName).trim()) && gn !== hn;
+  const phoneChanged =
+    Boolean(payload.guestPhone != null && String(payload.guestPhone).trim()) &&
+    !phoneKeysMatch(hubRow.guestPhone, payload.guestPhone);
+  const pS = payload.scheduledForIso != null && String(payload.scheduledForIso).trim() ? String(payload.scheduledForIso).trim() : null;
+  const hS = hubRow.scheduledForIso && String(hubRow.scheduledForIso).trim() ? String(hubRow.scheduledForIso).trim() : null;
+  const scheduleChanged = (pS || null) !== (hS || null);
+  return nameChanged || phoneChanged || scheduleChanged;
+}
+
 function resolveRemovalSpecs(removals, menuItems) {
   if (!removals || removals.length === 0) return [];
   return removals.map((r) => {
@@ -1296,6 +1329,36 @@ app.post("/tools/modify_order", async (req, res) => {
 
   const modifyMode = payload.modifyMode === "replace" ? "replace" : "merge";
   const existingReqItems = hubItemsToRequestItems(hubRow.items);
+
+  if (modifyMode === "merge" && (!payload.removeItems || payload.removeItems.length === 0)) {
+    try {
+      const pr = await resolveRequestedItems(payload);
+      if (pr.unavailable.length === 0 && resolvedCartsIdenticalForMergeGuard(existingReqItems, pr.resolved)) {
+        const metaChanged = hubGuestScheduleMetadataChanged(payload, hubRow);
+        if (metaChanged) {
+          mergeOrdersHubFromPayload(hubRow.orderGuid, hubRow.idempotencyKey, payload);
+          return res.json({
+            success: true,
+            guestOrScheduleOnly: true,
+            orderGuid: hubRow.orderGuid,
+            hubOrderId: hubRow.hubOrderId,
+            idempotencyKey: hubRow.idempotencyKey,
+            userMessage: "Pickup name or phone updated; food is unchanged.",
+          });
+        }
+        return res.json({
+          success: true,
+          noCartChange: true,
+          orderGuid: hubRow.orderGuid,
+          hubOrderId: hubRow.hubOrderId,
+          userMessage: "Order is already as requested.",
+        });
+      }
+    } catch (error) {
+      req.log.warn({ error }, "modify_order_merge_identity_guard_resolve_failed");
+    }
+  }
+
   const nextItems =
     modifyMode === "replace" ? payload.items : buildMergedModifyItems(existingReqItems, payload.items);
 

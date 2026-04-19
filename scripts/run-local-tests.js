@@ -391,6 +391,66 @@ async function main() {
     });
   }
 
+  // Same call: modify_order merge with identical items + only guestName change must not double quantities.
+  try {
+    const ts = Date.now();
+    const sess = `sess-namefix-${ts}`;
+    const call = `call-namefix-${ts}`;
+    const subNf = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        sessionId: sess,
+        callId: call,
+        restaurantId: "rest_001",
+        guestName: "Itsaram",
+        guestPhone: "+15550003333",
+        scheduledForIso: "2030-06-01T19:00:00-04:00",
+        items: [{ menuItemName: "Chicken Dum Biryani", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const modNf = await axios.post(
+      `${baseUrl}/tools/modify_order`,
+      {
+        sessionId: sess,
+        callId: call,
+        restaurantId: "rest_001",
+        guestName: "RAM",
+        guestPhone: "+15550003333",
+        scheduledForIso: "2030-06-01T19:00:00-04:00",
+        modifyMode: "merge",
+        items: [{ menuItemName: "Chicken Dum Biryani", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const hubNf = await axios.get(`${baseUrl}/internal/orders-hub/orders`, { headers, timeout: 10000, validateStatus: () => true });
+    const rowNf = (hubNf.data?.orders || []).find((o) => o.callId === call && o.fulfillmentStatus !== "Cancelled");
+    const biryaniLine = rowNf && rowNf.items.find((it) => it.name === "Chicken Dum Biryani");
+    const namefixOk =
+      subNf.status === 200 &&
+      subNf.data.success === true &&
+      modNf.status === 200 &&
+      modNf.data.success === true &&
+      modNf.data.guestOrScheduleOnly === true &&
+      rowNf &&
+      rowNf.guestName === "RAM" &&
+      biryaniLine &&
+      Number(biryaniLine.quantity) === 1;
+    results.push({
+      name: "modify-order-merge-same-cart-name-only-no-double-qty",
+      pass: namefixOk,
+      status: namefixOk ? 200 : "assert",
+      data: namefixOk ? {} : { subNf: subNf.data, modNf: modNf.data, rowNf, biryaniLine },
+    });
+  } catch (error) {
+    results.push({
+      name: "modify-order-merge-same-cart-name-only-no-double-qty",
+      pass: false,
+      status: "network-error",
+      data: { message: error.message },
+    });
+  }
+
   // New Vapi session (different sessionId/callId): resolve open order by pickup phone + name.
   try {
     const ts = Date.now();
