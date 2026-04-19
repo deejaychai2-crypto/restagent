@@ -228,10 +228,56 @@ async function main() {
       status: modifyFlowOk ? 200 : "assert",
       data: modifyFlowOk ? {} : { subM: subM.data, modRes: modRes.data, rowsMod },
     });
+
+    // merge + removeItems: drop a line the guest said they do not want (must not rely on merge-only items)
+    const removeCall = `call-modify-remove-${Date.now()}`;
+    const subR = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        sessionId: "sess-mod-remove",
+        callId: removeCall,
+        restaurantId: "rest_001",
+        items: [
+          { menuItemName: "Lamb Chops", quantity: 2 },
+          { menuItemName: "Chicken Dum Biryani", quantity: 1 },
+        ],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const modRemoveRes = await axios.post(
+      `${baseUrl}/tools/modify_order`,
+      {
+        sessionId: "sess-mod-remove",
+        callId: removeCall,
+        restaurantId: "rest_001",
+        modifyMode: "merge",
+        items: [],
+        removeItems: [{ menuItemName: "Lamb Chops" }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const hubRemove = await axios.get(`${baseUrl}/internal/orders-hub/orders`, { headers, timeout: 10000, validateStatus: () => true });
+    const rowsR = (hubRemove.data?.orders || []).filter((o) => o.callId === removeCall);
+    const newR = rowsR.find((o) => o.fulfillmentStatus === "Active");
+    const removeFlowOk =
+      subR.status === 200 &&
+      subR.data.success === true &&
+      modRemoveRes.status === 200 &&
+      modRemoveRes.data.success === true &&
+      newR &&
+      newR.items.some((it) => it.name === "Chicken Dum Biryani") &&
+      !newR.items.some((it) => it.name === "Lamb Chops");
+    results.push({
+      name: "modify-order-remove-items",
+      pass: removeFlowOk,
+      status: removeFlowOk ? 200 : "assert",
+      data: removeFlowOk ? {} : { subR: subR.data, modRemoveRes: modRemoveRes.data, newR },
+    });
   } catch (error) {
     results.push(
       { name: "cancel-order-after-submit", pass: false, status: "network-error", data: { message: error.message } },
       { name: "modify-order-replaces-items", pass: false, status: "network-error", data: { message: error.message } },
+      { name: "modify-order-remove-items", pass: false, status: "network-error", data: { message: error.message } },
     );
   }
 

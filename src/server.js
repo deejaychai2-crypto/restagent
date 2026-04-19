@@ -68,18 +68,38 @@ const diningBehaviorSchema = z.enum(["Takeout", "Delivery", "Curbside"]);
 /** Only used by modify_order; submit_order ignores it. merge = keep old items + new; replace = cart is only items in this request. */
 const modifyModeSchema = z.enum(["merge", "replace"]).optional();
 
-const submitOrderSchema = z
+const removeItemSchema = z
   .object({
-    sessionId: z.string().min(1),
-    callId: z.string().optional(),
-    restaurantId: z.string().min(1),
+    toastGuid: z.string().min(1).optional(),
+    menuItemName: z.string().min(1).optional(),
+    /** Omit to drop every matching line from the cart for that dish. */
+    quantity: z.number().int().positive().optional(),
+  })
+  .superRefine((item, ctx) => {
+    if (!item.toastGuid && !item.menuItemName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Each removeItems entry needs toastGuid or menuItemName",
+        path: [],
+      });
+    }
+  });
+
+const submitOrderBodySchema = z.object({
+  sessionId: z.string().min(1),
+  callId: z.string().optional(),
+  restaurantId: z.string().min(1),
+  guestName: z.string().max(120).optional(),
+  guestPhone: z.string().max(40).optional(),
+  diningBehavior: diningBehaviorSchema.optional().default("Takeout"),
+  // Require offset when provided, so "5 pm" doesn't silently become ASAP fallback.
+  scheduledForIso: z.string().datetime({ offset: true }).optional(),
+  modifyMode: modifyModeSchema,
+});
+
+const submitOrderSchema = submitOrderBodySchema
+  .extend({
     items: z.array(orderItemSchema).min(1),
-    guestName: z.string().max(120).optional(),
-    guestPhone: z.string().max(40).optional(),
-    diningBehavior: diningBehaviorSchema.optional().default("Takeout"),
-    // Require offset when provided, so "5 pm" doesn't silently become ASAP fallback.
-    scheduledForIso: z.string().datetime({ offset: true }).optional(),
-    modifyMode: modifyModeSchema,
   })
   .superRefine((data, ctx) => {
     data.items.forEach((item, idx) => {
@@ -91,6 +111,31 @@ const submitOrderSchema = z
         });
       }
     });
+  });
+
+/** modify_order: items may be empty if removeItems removes enough to leave a non-empty cart (validated in route). */
+const modifyOrderSchema = submitOrderBodySchema
+  .extend({
+    items: z.array(orderItemSchema).default([]),
+    removeItems: z.array(removeItemSchema).optional().default([]),
+  })
+  .superRefine((data, ctx) => {
+    data.items.forEach((item, idx) => {
+      if (!item.toastGuid && !item.menuItemName) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Each item needs toastGuid or menuItemName",
+          path: ["items", idx],
+        });
+      }
+    });
+    if (data.items.length === 0 && (!data.removeItems || data.removeItems.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "modify_order needs a non-empty items array and/or removeItems",
+        path: ["items"],
+      });
+    }
   });
 
 /** Flatten common LLM / Vapi shapes so the hub matches what was said on the call. */
@@ -150,6 +195,9 @@ function normalizeSubmitOrderBody(body) {
   if (next.modifyMode == null && (raw.replaceExistingItems === true || raw.cartReplacement === true)) {
     next.modifyMode = "replace";
   }
+
+  if (!next.removeItems && Array.isArray(raw.removedItems)) next.removeItems = raw.removedItems;
+  if (!next.removeItems && Array.isArray(raw.itemsToRemove)) next.removeItems = raw.itemsToRemove;
 
   return next;
 }
@@ -639,6 +687,42 @@ function buildMergedModifyItems(existingItems, requestedItems) {
   return orderedKeys.map((k) => mergedMap.get(k));
 }
 
+function resolveRemovalSpecs(removals, menuItems) {
+  if (!removals || removals.length === 0) return [];
+  return removals.map((r) => {
+    const qty = r.quantity;
+    if (r.toastGuid && String(r.toastGuid).trim()) {
+      return { toastGuid: String(r.toastGuid).trim(), quantity: qty };
+    }
+    const m = findRequestedMenuItem({ toastGuid: undefined, menuItemName: r.menuItemName }, menuItems);
+    if (m) return { toastGuid: m.toastGuid, menuItemName: m.name, quantity: qty };
+    return { menuItemName: r.menuItemName && String(r.menuItemName).trim(), quantity: qty };
+  });
+}
+
+/** Subtract or delete lines; matches toastGuid first, else menuItemName (case-insensitive). */
+function applyRemoveItems(cart, removals) {
+  if (!removals || removals.length === 0) return cart;
+  let lines = cart.map((x) => ({ ...x, quantity: Number(x.quantity || 0) })).filter((x) => x.quantity > 0);
+  for (const rem of removals) {
+    const guid = rem.toastGuid && String(rem.toastGuid).trim();
+    const nameLower = rem.menuItemName && String(rem.menuItemName).trim().toLowerCase();
+    const remQty = rem.quantity;
+    lines = lines
+      .map((line) => {
+        const matchGuid = guid && line.toastGuid && String(line.toastGuid).trim() === guid;
+        const ln = (line.menuItemName && String(line.menuItemName).trim().toLowerCase()) || "";
+        const matchName = nameLower && ln === nameLower;
+        if (!matchGuid && !matchName) return line;
+        if (remQty == null) return { ...line, quantity: 0 };
+        const nextQ = Math.max(0, Number(line.quantity || 0) - remQty);
+        return { ...line, quantity: nextQ };
+      })
+      .filter((line) => line.quantity > 0);
+  }
+  return lines;
+}
+
 /** Toast void requires orders.channel:void scope and OTHER tender on the check; see Toast docs. */
 async function voidToastOrder(orderGuid) {
   if (!orderGuid || orderGuid === "unknown") return { ok: true, skipped: true };
@@ -1063,7 +1147,7 @@ app.post("/tools/cancel_order", async (req, res) => {
 
 app.post("/tools/modify_order", async (req, res) => {
   if (!withAuth(req, res)) return;
-  const parsed = submitOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
+  const parsed = modifyOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
   if (!parsed.success) {
     return res.status(400).json({ success: false, error: "invalid_payload", details: parsed.error.issues });
   }
@@ -1085,8 +1169,42 @@ app.post("/tools/modify_order", async (req, res) => {
   const existingReqItems = hubItemsToRequestItems(hubRow.items);
   const nextItems =
     modifyMode === "replace" ? payload.items : buildMergedModifyItems(existingReqItems, payload.items);
-  const { modifyMode: _omitModifyMode, ...payloadForSubmit } = payload;
-  const mergedPayload = { ...payloadForSubmit, items: nextItems };
+
+  let menuForRemovals = [];
+  try {
+    menuForRemovals = await fetchMenu({ forceFresh: true });
+  } catch (error) {
+    req.log.error({ error }, "Failed to load menu for modify_order removals");
+    return res.status(503).json({
+      success: false,
+      error: "submission_failed",
+      retryable: true,
+      userMessage: "Sorry, we could not update the order right now. Please try again.",
+    });
+  }
+  const resolvedRemovals = resolveRemovalSpecs(payload.removeItems || [], menuForRemovals);
+  const afterRemovals = applyRemoveItems(nextItems, resolvedRemovals);
+
+  if (afterRemovals.length === 0) {
+    return res.json({
+      success: false,
+      error: "empty_cart_after_modification",
+      hint: "After removals the cart would be empty. Use cancel_order instead, or keep at least one item.",
+    });
+  }
+
+  const { modifyMode: _omitModifyMode, removeItems: _omitRemoveItems, ...payloadForSubmit } = payload;
+  const carriedSchedule =
+    payload.scheduledForIso && String(payload.scheduledForIso).trim()
+      ? String(payload.scheduledForIso).trim()
+      : hubRow.scheduledForIso && String(hubRow.scheduledForIso).trim()
+        ? String(hubRow.scheduledForIso).trim()
+        : undefined;
+  const mergedPayload = {
+    ...payloadForSubmit,
+    items: afterRemovals,
+    ...(carriedSchedule ? { scheduledForIso: carriedSchedule } : {}),
+  };
 
   // Validate/resolve replacement first so we never cancel an order unless the new one is placeable.
   let preflight;
@@ -1128,6 +1246,7 @@ app.post("/tools/modify_order", async (req, res) => {
   return res.status(submitOut.status).json({
     ...submitOut.json,
     modifyMode,
+    removeItemsApplied: resolvedRemovals.length > 0 ? resolvedRemovals : undefined,
     replacedPreviousHubOrderId: hubRow.hubOrderId,
     replacedPreviousOrderGuid: hubRow.orderGuid,
   });
