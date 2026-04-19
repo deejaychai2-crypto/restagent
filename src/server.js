@@ -1270,6 +1270,9 @@ app.post("/tools/get_menu", async (req, res) => {
       menu: { categories },
       unavailable: buildUnavailableSuggestions(filtered.unavailable, filtered.available),
       fetchedAt: new Date().toISOString(),
+      /** Spoken “next available” pickup quote for voice agents (matches hub ASAP logic). */
+      quoteMinutesTakeout: QUOTE_MINUTES_TAKEOUT,
+      restaurantTimezone: RESTAURANT_TIMEZONE,
     });
   } catch (error) {
     req.log.error({ error }, "Failed to fetch menu");
