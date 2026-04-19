@@ -88,6 +88,20 @@ const cases = [
     expectError: "invalid_payload",
   },
   {
+    name: "submit-order-asap-empty-scheduledForIso",
+    method: "post",
+    path: "/tools/submit_order",
+    payload: {
+      sessionId: "sess-asap-empty-sched",
+      callId: "call-asap-empty-sched",
+      restaurantId: "rest_001",
+      scheduledForIso: "",
+      items: [{ menuItemName: "Samosa", quantity: 1 }],
+    },
+    expectStatus: 200,
+    expectSuccess: true,
+  },
+  {
     name: "cancel-order-not-found",
     method: "post",
     path: "/tools/cancel_order",

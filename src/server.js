@@ -143,6 +143,14 @@ function normalizeSubmitOrderBody(body) {
   if (!body || typeof body !== "object") return body;
   const raw = body;
   const next = { ...raw };
+  // Vapi / OpenAPI tools often send optional string fields as "" (JSON Schema default). Zod
+  // still validates "" against .datetime(), so treat blank as omitted.
+  if (next.scheduledForIso != null && String(next.scheduledForIso).trim() === "") {
+    delete next.scheduledForIso;
+  }
+  if (next.callId != null && String(next.callId).trim() === "") {
+    delete next.callId;
+  }
   if (!next.items && raw.order && Array.isArray(raw.order.items)) next.items = raw.order.items;
 
   const callObj = raw.call && typeof raw.call === "object" ? raw.call : null;
