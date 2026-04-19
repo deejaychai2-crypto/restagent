@@ -14,5 +14,7 @@ if (!base) {
 }
 console.log("Use these in Vapi (POST, header x-api-key):");
 console.log("");
-console.log("get_menu:    ", `${base}/tools/get_menu`);
-console.log("submit_order:", `${base}/tools/submit_order`);
+console.log("get_menu:     ", `${base}/tools/get_menu`);
+console.log("submit_order: ", `${base}/tools/submit_order`);
+console.log("cancel_order: ", `${base}/tools/cancel_order`);
+console.log("modify_order: ", `${base}/tools/modify_order`);

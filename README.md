@@ -1,6 +1,6 @@
 # Empire Biryani & Grille Voice Agent Backend
 
-Node.js backend for Vapi tools (`get_menu`, `submit_order`) for an Indian grill ordering flow with Toast integration and test mode.
+Node.js backend for Vapi tools (`get_menu`, `submit_order`, `cancel_order`, `modify_order`) for an Indian grill ordering flow with Toast integration and test mode.
 
 The included demo tenant is aligned to `Empire Biryani & Grille` using public menu information and restaurant hours from the official site.
 
@@ -115,6 +115,10 @@ Use this payload shape:
 }
 ```
 
+`POST /tools/cancel_order` — `{ "sessionId", "callId", "restaurantId", "orderGuid"?, "reason"? }`. Voids the order in Toast (live) when allowed, marks the hub row **Cancelled**, and clears idempotency so a new `submit_order` can reuse the same `callId`.
+
+`POST /tools/modify_order` — same JSON body as `submit_order`. Cancels the current open order for that `sessionId` + `callId`, then places the new one. Live Toast voids need **OTHER** tender and `orders.channel:void` scope (see Toast developer guide).
+
 ## 8) Switch to Toast live mode
 
 1. Set in `.env`:
@@ -131,4 +135,6 @@ Use this payload shape:
 - `GET /health/ready`
 - `POST /tools/get_menu`
 - `POST /tools/submit_order`
+- `POST /tools/cancel_order`
+- `POST /tools/modify_order`
 - `POST /webhooks/vapi/order` (legacy alias to submit order)

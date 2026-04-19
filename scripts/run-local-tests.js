@@ -1,7 +1,12 @@
 const axios = require("axios");
+
+// Avoid port 3000 collisions with a dev server: load `src/server.js` with a free PORT unless BASE_URL is set.
+if (!process.env.BASE_URL) {
+  process.env.PORT = String(18000 + Math.floor(Math.random() * 15000));
+}
 const { start } = require("../src/server");
 
-const baseUrl = process.env.BASE_URL || "http://localhost:3000";
+const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT}`;
 const apiKey = process.env.WEBHOOK_API_KEY || "";
 
 const headers = apiKey ? { "x-api-key": apiKey } : {};
@@ -81,6 +86,19 @@ const cases = [
     expectStatus: 400,
     expectSuccess: false,
   },
+  {
+    name: "cancel-order-not-found",
+    method: "post",
+    path: "/tools/cancel_order",
+    payload: {
+      sessionId: "sess-no-such-order",
+      callId: "call-no-such-order",
+      restaurantId: "rest_001",
+    },
+    expectStatus: 200,
+    expectSuccess: false,
+    expectError: "order_not_found",
+  },
 ];
 
 async function runCase(testCase) {
@@ -128,6 +146,144 @@ async function main() {
   const results = [];
   for (const testCase of cases) {
     results.push(await runCase(testCase));
+  }
+
+  // cancel_order (after submit) + modify_order (replace items, same callId)
+  try {
+    const cancelCall = `call-cancel-${Date.now()}`;
+    const sub1 = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        sessionId: "sess-cancel-flow",
+        callId: cancelCall,
+        restaurantId: "rest_001",
+        items: [{ menuItemName: "Garlic Naan", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const cancelRes = await axios.post(
+      `${baseUrl}/tools/cancel_order`,
+      {
+        sessionId: "sess-cancel-flow",
+        callId: cancelCall,
+        restaurantId: "rest_001",
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const hubAfterCancel = await axios.get(`${baseUrl}/internal/orders-hub/orders`, { headers, timeout: 10000, validateStatus: () => true });
+    const rowCancel = (hubAfterCancel.data?.orders || []).find((o) => o.callId === cancelCall);
+
+    const modCall = `call-modify-${Date.now()}`;
+    const subM = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        sessionId: "sess-mod-flow",
+        callId: modCall,
+        restaurantId: "rest_001",
+        items: [{ menuItemName: "Garlic Naan", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const modRes = await axios.post(
+      `${baseUrl}/tools/modify_order`,
+      {
+        sessionId: "sess-mod-flow",
+        callId: modCall,
+        restaurantId: "rest_001",
+        items: [{ menuItemName: "Chicken Dum Biryani", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const hubAfterMod = await axios.get(`${baseUrl}/internal/orders-hub/orders`, { headers, timeout: 10000, validateStatus: () => true });
+    const rowsMod = (hubAfterMod.data?.orders || []).filter((o) => o.callId === modCall);
+    const oldRow = rowsMod.find((o) => o.fulfillmentStatus === "Cancelled");
+    const newRow = rowsMod.find((o) => o.fulfillmentStatus === "Active");
+
+    const cancelFlowOk =
+      sub1.status === 200 &&
+      sub1.data.success === true &&
+      cancelRes.status === 200 &&
+      cancelRes.data.success === true &&
+      rowCancel &&
+      rowCancel.fulfillmentStatus === "Cancelled";
+    results.push({
+      name: "cancel-order-after-submit",
+      pass: cancelFlowOk,
+      status: cancelFlowOk ? 200 : "assert",
+      data: cancelFlowOk ? {} : { sub1: sub1.data, cancelRes: cancelRes.data, rowCancel },
+    });
+
+    const modifyFlowOk =
+      subM.status === 200 &&
+      subM.data.success === true &&
+      modRes.status === 200 &&
+      modRes.data.success === true &&
+      oldRow &&
+      newRow &&
+      newRow.items.some((it) => it.name === "Chicken Dum Biryani") &&
+      oldRow.replacedByHubOrderId === newRow.hubOrderId;
+    results.push({
+      name: "modify-order-replaces-items",
+      pass: modifyFlowOk,
+      status: modifyFlowOk ? 200 : "assert",
+      data: modifyFlowOk ? {} : { subM: subM.data, modRes: modRes.data, rowsMod },
+    });
+  } catch (error) {
+    results.push(
+      { name: "cancel-order-after-submit", pass: false, status: "network-error", data: { message: error.message } },
+      { name: "modify-order-replaces-items", pass: false, status: "network-error", data: { message: error.message } },
+    );
+  }
+
+  // Duplicate submit_order with same callId merges guest + schedule into Orders Hub (no second Toast order).
+  const mergeCallId = `hub-merge-${Date.now()}`;
+  const mergeBase = {
+    sessionId: "sess-merge",
+    callId: mergeCallId,
+    restaurantId: "rest_001",
+    items: [
+      { menuItemName: "Chicken Dum Biryani", quantity: 1 },
+      { menuItemName: "Garlic Naan", quantity: 1 },
+    ],
+  };
+  try {
+    const first = await axios.post(`${baseUrl}/tools/submit_order`, mergeBase, { headers, timeout: 10000, validateStatus: () => true });
+    const second = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        ...mergeBase,
+        guestName: "Merge Test",
+        guestPhone: "+15550001111",
+        scheduledForIso: "2030-01-15T20:00:00-05:00",
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const hubRes = await axios.get(`${baseUrl}/internal/orders-hub/orders`, { headers, timeout: 10000, validateStatus: () => true });
+    const row = (hubRes.data?.orders || []).find((o) => o.callId === mergeCallId);
+    const mergeOk =
+      first.status === 200 &&
+      first.data.success === true &&
+      second.status === 200 &&
+      second.data.duplicate === true &&
+      hubRes.status === 200 &&
+      row &&
+      row.guestName === "Merge Test" &&
+      row.guestPhone === "+15550001111" &&
+      row.scheduledForIso === "2030-01-15T20:00:00-05:00" &&
+      row.fulfillmentStatus === "Scheduled";
+    results.push({
+      name: "orders-hub-merge-on-duplicate-submit",
+      pass: mergeOk,
+      status: mergeOk ? 200 : "assert",
+      data: mergeOk ? {} : { first: first.data, second: second.data, hub: hubRes.data, row },
+    });
+  } catch (error) {
+    results.push({
+      name: "orders-hub-merge-on-duplicate-submit",
+      pass: false,
+      status: "network-error",
+      data: { message: error.message },
+    });
   }
 
   let failed = 0;

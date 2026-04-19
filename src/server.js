@@ -74,7 +74,8 @@ const submitOrderSchema = z
     guestName: z.string().max(120).optional(),
     guestPhone: z.string().max(40).optional(),
     diningBehavior: diningBehaviorSchema.optional().default("Takeout"),
-    scheduledForIso: z.string().optional(),
+    // Require offset when provided, so "5 pm" doesn't silently become ASAP fallback.
+    scheduledForIso: z.string().datetime({ offset: true }).optional(),
   })
   .superRefine((data, ctx) => {
     data.items.forEach((item, idx) => {
@@ -87,6 +88,57 @@ const submitOrderSchema = z
       }
     });
   });
+
+/** Flatten common LLM / Vapi shapes so the hub matches what was said on the call. */
+function normalizeSubmitOrderBody(body) {
+  if (!body || typeof body !== "object") return body;
+  const raw = body;
+  const next = { ...raw };
+  if (!next.items && raw.order && Array.isArray(raw.order.items)) next.items = raw.order.items;
+
+  const callObj = raw.call && typeof raw.call === "object" ? raw.call : null;
+  if (!next.callId && callObj?.id) next.callId = String(callObj.id);
+  if (!next.sessionId && callObj?.id) next.sessionId = String(callObj.id);
+  if (!next.guestPhone && (callObj?.from || callObj?.phoneNumber || callObj?.phone)) {
+    next.guestPhone = String(callObj.from || callObj.phoneNumber || callObj.phone);
+  }
+  if (!next.guestName && callObj?.customer && typeof callObj.customer === "object" && callObj.customer?.name) {
+    next.guestName = String(callObj.customer.name);
+  }
+
+  const cust = raw.customer && typeof raw.customer === "object" ? raw.customer : null;
+  if (!next.guestName && cust?.name) next.guestName = String(cust.name);
+  if (!next.guestPhone && (cust?.phone || cust?.phoneNumber)) {
+    next.guestPhone = String(cust.phone || cust.phoneNumber);
+  }
+
+  if (!next.guestName && raw.customerName) next.guestName = String(raw.customerName);
+  if (!next.guestName && raw.pickupName) next.guestName = String(raw.pickupName);
+  if (!next.guestName && raw.callerName) next.guestName = String(raw.callerName);
+  if (!next.guestName && raw.name) next.guestName = String(raw.name);
+  if (!next.guestPhone && raw.customerPhone) next.guestPhone = String(raw.customerPhone);
+  if (!next.guestPhone && raw.phone) next.guestPhone = String(raw.phone);
+  if (!next.guestPhone && raw.phoneNumber) next.guestPhone = String(raw.phoneNumber);
+  if (!next.guestPhone && raw.callerPhone) next.guestPhone = String(raw.callerPhone);
+  if (!next.guestPhone && raw.fromNumber) next.guestPhone = String(raw.fromNumber);
+
+  const schedRaw =
+    raw.scheduledForIso ||
+    raw.scheduledPickupIso ||
+    raw.scheduledTime ||
+    raw.scheduledPickupTime ||
+    raw.pickupTime ||
+    raw.pickupAt ||
+    raw.pickupTimeIso ||
+    raw.pickupDateTime ||
+    raw.readyAt ||
+    raw.pickupAtIso;
+  if (!next.scheduledForIso && schedRaw != null && schedRaw !== "") {
+    next.scheduledForIso = typeof schedRaw === "string" ? schedRaw : String(schedRaw);
+  }
+
+  return next;
+}
 
 function withAuth(req, res) {
   if (!WEBHOOK_API_KEY) return true;
@@ -148,17 +200,22 @@ function initialFulfillmentStatus(scheduledForIso) {
   return t > Date.now() + 60 * 1000 ? "Scheduled" : "Active";
 }
 
-function appendOrdersHubSnapshot({ payload, resolved, submitted, idempotencyKey }) {
-  const orders = loadOrdersHubStore();
-  if (orders.some((o) => o.idempotencyKey === idempotencyKey)) return;
-  const placedAt = new Date().toISOString();
-  const behavior = payload.diningBehavior || "Takeout";
+function computeOrderTiming(payload) {
   const fulfillmentStatus = initialFulfillmentStatus(payload.scheduledForIso);
   const dueMs =
     fulfillmentStatus === "Scheduled" && payload.scheduledForIso
       ? new Date(payload.scheduledForIso).getTime()
       : Date.now() + QUOTE_MINUTES_TAKEOUT * 60 * 1000;
   const dueAt = Number.isNaN(dueMs) ? null : new Date(dueMs).toISOString();
+  return { fulfillmentStatus, dueAt };
+}
+
+function appendOrdersHubSnapshot({ payload, resolved, submitted, idempotencyKey }) {
+  const orders = loadOrdersHubStore();
+  if (orders.some((o) => o.idempotencyKey === idempotencyKey && hubOrderAmendable(o))) return;
+  const placedAt = new Date().toISOString();
+  const behavior = payload.diningBehavior || "Takeout";
+  const { fulfillmentStatus, dueAt } = computeOrderTiming(payload);
 
   const row = {
     hubOrderId: crypto.randomUUID(),
@@ -174,6 +231,7 @@ function appendOrdersHubSnapshot({ payload, resolved, submitted, idempotencyKey 
     diningOptionLabel: diningOptionLabel(behavior),
     guestName: (payload.guestName && payload.guestName.trim()) || "Guest",
     guestPhone: (payload.guestPhone && payload.guestPhone.trim()) || "—",
+    scheduledForIso: payload.scheduledForIso && String(payload.scheduledForIso).trim() ? String(payload.scheduledForIso).trim() : null,
     checkNumber: nextCheckNumber(orders),
     paid: false,
     fulfillmentStatus,
@@ -189,6 +247,39 @@ function appendOrdersHubSnapshot({ payload, resolved, submitted, idempotencyKey 
   orders.push(row);
   saveOrdersHubStore(orders);
   return row.hubOrderId;
+}
+
+function mergeOrdersHubFromPayload(orderGuid, idempotencyKey, payload) {
+  const orders = loadOrdersHubStore();
+  let idx = orderGuid ? orders.findIndex((o) => o.orderGuid === orderGuid) : -1;
+  if (idx === -1 && idempotencyKey) {
+    idx = orders.findIndex((o) => o.idempotencyKey === idempotencyKey);
+  }
+  if (idx === -1) {
+    logger.debug({ orderGuid, idempotencyKey, hubCount: orders.length }, "orders_hub_merge_miss");
+    return;
+  }
+
+  const row = { ...orders[idx] };
+  const gn = payload.guestName && String(payload.guestName).trim();
+  const gp = payload.guestPhone && String(payload.guestPhone).trim();
+  if (gn) row.guestName = gn;
+  if (gp) row.guestPhone = gp;
+  if (payload.callId && String(payload.callId).trim()) row.callId = String(payload.callId).trim();
+
+  const sched = payload.scheduledForIso && String(payload.scheduledForIso).trim();
+  if (sched) {
+    const t = new Date(sched).getTime();
+    if (!Number.isNaN(t)) {
+      row.scheduledForIso = sched;
+      const { fulfillmentStatus, dueAt } = computeOrderTiming({ ...payload, scheduledForIso: sched });
+      row.fulfillmentStatus = fulfillmentStatus;
+      if (dueAt) row.dueAt = dueAt;
+    }
+  }
+
+  orders[idx] = row;
+  saveOrdersHubStore(orders);
 }
 
 function loadIdempotencyStore(filePath) {
@@ -334,11 +425,10 @@ function filterAvailableItems(items, nowIso) {
   return { available, unavailable };
 }
 
+/** Voice/tool payload: no long descriptions (reduces tokens and stops the model from reading blurbs aloud). */
 function formatMenuItemForVapi(item) {
   return {
     name: item.name,
-    category: item.category || "Uncategorized",
-    description: item.description || "",
     price: item.price,
     toastGuid: item.toastGuid,
   };
@@ -433,6 +523,219 @@ async function submitOrderWithRetry(orderPayload, idempotencyKey) {
   }
 }
 
+function hubOrderAmendable(o) {
+  return o.fulfillmentStatus !== "Cancelled" && o.fulfillmentStatus !== "Completed";
+}
+
+/** Latest open phone order for this session (optionally narrowed by callId or exact orderGuid). */
+function findAmendableHubOrder({ sessionId, callId, orderGuid }) {
+  const orders = loadOrdersHubStore();
+  const candidates = orders.filter((o) => o.sessionId === sessionId && hubOrderAmendable(o));
+  if (orderGuid) {
+    const row = candidates.find((o) => o.orderGuid === orderGuid);
+    if (!row) return null;
+    if (callId && row.callId && String(row.callId) !== String(callId)) return null;
+    return row;
+  }
+  if (callId) {
+    const matched = candidates.filter((o) => o.callId && String(o.callId) === String(callId));
+    if (matched.length === 0) return null;
+    matched.sort((a, b) => new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime());
+    return matched[0];
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime());
+  return candidates[0];
+}
+
+function clearIdempotencyEntry(idempotencyKey) {
+  if (!idempotencyKey) return;
+  if (idempotencyStore[idempotencyKey]) {
+    delete idempotencyStore[idempotencyKey];
+    saveIdempotencyStore();
+  }
+}
+
+function patchHubOrderById(hubOrderId, patch) {
+  const orders = loadOrdersHubStore();
+  const idx = orders.findIndex((o) => o.hubOrderId === hubOrderId);
+  if (idx === -1) return false;
+  orders[idx] = { ...orders[idx], ...patch };
+  saveOrdersHubStore(orders);
+  return true;
+}
+
+function markHubOrderCancelled(hubOrderId, { reason } = {}) {
+  return patchHubOrderById(hubOrderId, {
+    fulfillmentStatus: "Cancelled",
+    cancelledAt: new Date().toISOString(),
+    cancelReason: reason || "",
+    unread: false,
+  });
+}
+
+/** Toast void requires orders.channel:void scope and OTHER tender on the check; see Toast docs. */
+async function voidToastOrder(orderGuid) {
+  if (!orderGuid || orderGuid === "unknown") return { ok: true, skipped: true };
+  if (ORDER_MODE === "test" || String(orderGuid).startsWith("test-")) {
+    return { ok: true, skipped: true };
+  }
+  try {
+    await toastRequest({
+      method: "POST",
+      url: `${TOAST_BASE_URL}/orders/v2/orders/${orderGuid}/void`,
+      data: {
+        selections: { voidAll: true },
+        payments: { voidAll: true },
+      },
+    });
+    return { ok: true };
+  } catch (error) {
+    const msg = error.response?.data?.message || error.response?.data?.error || error.message || "void_failed";
+    const status = error.response?.status;
+    return { ok: false, status, message: String(msg) };
+  }
+}
+
+async function performCancelOrder(payload) {
+  const hubRow = findAmendableHubOrder({
+    sessionId: payload.sessionId,
+    callId: payload.callId,
+    orderGuid: payload.orderGuid,
+  });
+  if (!hubRow) {
+    return { status: 200, json: { success: false, error: "order_not_found" } };
+  }
+  if (hubRow.fulfillmentStatus === "Cancelled") {
+    return {
+      status: 200,
+      json: { success: true, alreadyCancelled: true, orderGuid: hubRow.orderGuid, hubOrderId: hubRow.hubOrderId },
+    };
+  }
+
+  const voidResult = await voidToastOrder(hubRow.orderGuid);
+  if (!voidResult.ok) {
+    return {
+      status: 200,
+      json: {
+        success: false,
+        error: "void_failed",
+        toastStatus: voidResult.status,
+        message: voidResult.message,
+        hint:
+          "Live Toast voids need OTHER tender on the order and orders.channel:void scope. Staff can void in Toast if this fails.",
+      },
+    };
+  }
+
+  markHubOrderCancelled(hubRow.hubOrderId, { reason: payload.reason || "Customer cancelled" });
+  clearIdempotencyEntry(hubRow.idempotencyKey);
+
+  return {
+    status: 200,
+    json: {
+      success: true,
+      orderGuid: hubRow.orderGuid,
+      hubOrderId: hubRow.hubOrderId,
+      idempotencyKey: hubRow.idempotencyKey,
+    },
+  };
+}
+
+async function performSubmitOrder(payload) {
+  if (!isRestaurantOpen()) {
+    return {
+      status: 200,
+      json: {
+        success: false,
+        error: "restaurant_closed",
+        opensAt: BUSINESS_HOURS_OPEN,
+        timezone: RESTAURANT_TIMEZONE,
+      },
+    };
+  }
+
+  const idemKey = submissionIdempotencyKey(payload);
+  if (idempotencyStore[idemKey]) {
+    const prior = idempotencyStore[idemKey];
+    mergeOrdersHubFromPayload(prior.orderGuid, idemKey, payload);
+    return {
+      status: 200,
+      json: {
+        success: true,
+        duplicate: true,
+        orderGuid: prior.orderGuid,
+        idempotencyKey: idemKey,
+      },
+    };
+  }
+
+  try {
+    const freshMenu = await fetchMenu({ forceFresh: true });
+    const filtered = filterAvailableItems(freshMenu);
+    const unavailable = [];
+    const resolved = [];
+    for (const reqItem of payload.items) {
+      const match = findRequestedMenuItem(reqItem, filtered.available);
+      if (!match) {
+        unavailable.push(reqItem.menuItemName || reqItem.toastGuid || "unknown_item");
+      } else {
+        resolved.push({ ...reqItem, toastGuid: match.toastGuid, menuItemName: match.name });
+      }
+    }
+
+    if (unavailable.length > 0) {
+      return {
+        status: 200,
+        json: {
+          success: false,
+          error: "items_unavailable",
+          unavailable,
+          available: resolved.map((x) => x.menuItemName),
+        },
+      };
+    }
+
+    const toastOrder = buildToastOrder(resolved);
+    const submitted = await submitOrderWithRetry(toastOrder, idemKey);
+    idempotencyStore[idemKey] = {
+      createdAt: Date.now(),
+      orderGuid: submitted.guid,
+      sessionId: payload.sessionId,
+    };
+    saveIdempotencyStore();
+    const hubOrderId = appendOrdersHubSnapshot({
+      payload,
+      resolved,
+      submitted,
+      idempotencyKey: idemKey,
+    });
+
+    return {
+      status: 200,
+      json: {
+        success: true,
+        duplicate: false,
+        orderGuid: submitted.guid,
+        idempotencyKey: idemKey,
+        mode: submitted.mode,
+        hubOrderId,
+      },
+    };
+  } catch (error) {
+    logger.error({ error }, "Failed to submit order");
+    return {
+      status: 503,
+      json: {
+        success: false,
+        error: "submission_failed",
+        retryable: true,
+        userMessage: "Sorry, we could not place your order right now. Please try again.",
+      },
+    };
+  }
+}
+
 app.get("/", (_req, res) => {
   res.type("html").send(`<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"/><title>RestVagent</title></head>
@@ -473,7 +776,15 @@ app.get("/orders-hub/", serveOrdersHubIndex);
 app.get("/orders-hub", serveOrdersHubIndex);
 app.use("/orders-hub", express.static(ordersHubDir, { index: false }));
 
-const hubStatusSchema = z.enum(["Needs Approval", "Scheduled", "Active", "Order Ready", "Completed"]);
+const hubStatusSchema = z.enum(["Needs Approval", "Scheduled", "Active", "Order Ready", "Completed", "Cancelled"]);
+
+const cancelOrderSchema = z.object({
+  sessionId: z.string().min(1),
+  callId: z.string().optional(),
+  restaurantId: z.string().min(1),
+  orderGuid: z.string().optional(),
+  reason: z.string().max(240).optional(),
+});
 
 app.get("/internal/orders-hub/orders", (req, res) => {
   if (!withOrdersHubAuth(req, res)) return;
@@ -524,18 +835,10 @@ app.post("/tools/get_menu", async (req, res) => {
     const menu = await fetchMenu({ forceFresh: false });
     const filtered = filterAvailableItems(menu, nowIso);
     const categories = groupMenuForVapi(filtered.available);
-    const flatMenu = categories.flatMap((category) => category.items);
     return res.json({
       success: true,
-      menu: {
-        categories,
-        items: flatMenu,
-      },
+      menu: { categories },
       unavailable: buildUnavailableSuggestions(filtered.unavailable, filtered.available),
-      guidance: {
-        speakOnlyFromAvailableMenu: true,
-        confirmUnavailableItemsAreNotOffered: true,
-      },
       fetchedAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -546,99 +849,84 @@ app.post("/tools/get_menu", async (req, res) => {
 
 app.post("/tools/submit_order", async (req, res) => {
   if (!withAuth(req, res)) return;
-  const parsed = submitOrderSchema.safeParse(req.body);
+  const parsed = submitOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, error: "invalid_payload", details: parsed.error.issues });
+  }
+  const out = await performSubmitOrder(parsed.data);
+  return res.status(out.status).json(out.json);
+});
+
+app.post("/tools/cancel_order", async (req, res) => {
+  if (!withAuth(req, res)) return;
+  const parsed = cancelOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
+  if (!parsed.success) {
+    return res.status(400).json({ success: false, error: "invalid_payload", details: parsed.error.issues });
+  }
+  const out = await performCancelOrder(parsed.data);
+  return res.status(out.status).json(out.json);
+});
+
+app.post("/tools/modify_order", async (req, res) => {
+  if (!withAuth(req, res)) return;
+  const parsed = submitOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
   if (!parsed.success) {
     return res.status(400).json({ success: false, error: "invalid_payload", details: parsed.error.issues });
   }
   const payload = parsed.data;
-  return processSubmitOrder(req, res, payload);
+  const hubRow = findAmendableHubOrder({
+    sessionId: payload.sessionId,
+    callId: payload.callId,
+    orderGuid: undefined,
+  });
+  if (!hubRow) {
+    return res.json({
+      success: false,
+      error: "no_active_order_to_replace",
+      hint: "Nothing to replace for this session/call — use submit_order for a first order.",
+    });
+  }
+
+  const cancelOut = await performCancelOrder({
+    sessionId: payload.sessionId,
+    callId: payload.callId,
+    restaurantId: payload.restaurantId,
+    orderGuid: hubRow.orderGuid,
+    reason: "Customer changed the order",
+  });
+  if (!cancelOut.json.success) {
+    return res.status(cancelOut.status).json(cancelOut.json);
+  }
+
+  const submitOut = await performSubmitOrder(payload);
+  if (submitOut.json.success && submitOut.json.hubOrderId) {
+    patchHubOrderById(hubRow.hubOrderId, { replacedByHubOrderId: submitOut.json.hubOrderId });
+  }
+  return res.status(submitOut.status).json({
+    ...submitOut.json,
+    replacedPreviousHubOrderId: hubRow.hubOrderId,
+    replacedPreviousOrderGuid: hubRow.orderGuid,
+  });
 });
 
 async function processSubmitOrder(req, res, payload) {
-
-  if (!isRestaurantOpen()) {
-    return res.json({ success: false, error: "restaurant_closed", opensAt: BUSINESS_HOURS_OPEN, timezone: RESTAURANT_TIMEZONE });
-  }
-
-  const idemKey = submissionIdempotencyKey(payload);
-  if (idempotencyStore[idemKey]) {
-    return res.json({
-      success: true,
-      duplicate: true,
-      orderGuid: idempotencyStore[idemKey].orderGuid,
-      idempotencyKey: idemKey,
-    });
-  }
-
-  try {
-    const freshMenu = await fetchMenu({ forceFresh: true });
-    const filtered = filterAvailableItems(freshMenu);
-    const unavailable = [];
-    const resolved = [];
-    for (const reqItem of payload.items) {
-      const match = findRequestedMenuItem(reqItem, filtered.available);
-      if (!match) {
-        unavailable.push(reqItem.menuItemName || reqItem.toastGuid || "unknown_item");
-      } else {
-        resolved.push({ ...reqItem, toastGuid: match.toastGuid, menuItemName: match.name });
-      }
-    }
-
-    if (unavailable.length > 0) {
-      return res.json({
-        success: false,
-        error: "items_unavailable",
-        unavailable,
-        available: resolved.map((x) => x.menuItemName),
-      });
-    }
-
-    const toastOrder = buildToastOrder(resolved);
-    const submitted = await submitOrderWithRetry(toastOrder, idemKey);
-    idempotencyStore[idemKey] = {
-      createdAt: Date.now(),
-      orderGuid: submitted.guid,
-      sessionId: payload.sessionId,
-    };
-    saveIdempotencyStore();
-    const hubOrderId = appendOrdersHubSnapshot({
-      payload,
-      resolved,
-      submitted,
-      idempotencyKey: idemKey,
-    });
-
-    return res.json({
-      success: true,
-      duplicate: false,
-      orderGuid: submitted.guid,
-      idempotencyKey: idemKey,
-      mode: submitted.mode,
-      hubOrderId,
-    });
-  } catch (error) {
-    req.log.error({ error }, "Failed to submit order");
-    return res.status(503).json({
-      success: false,
-      error: "submission_failed",
-      retryable: true,
-      userMessage: "Sorry, we could not place your order right now. Please try again.",
-    });
-  }
+  const out = await performSubmitOrder(payload);
+  return res.status(out.status).json(out.json);
 }
 
 app.post("/webhooks/vapi/order", async (req, res) => {
   // Backward-compatible alias to submit_order with a default session.
   if (!withAuth(req, res)) return;
+  const raw = normalizeSubmitOrderBody(req.body);
   const payload = {
-    sessionId: req.body.sessionId || req.body.callId || `legacy_${Date.now()}`,
-    callId: req.body.callId,
-    restaurantId: req.body.restaurantId,
-    items: req.body.items || req.body.order?.items,
-    guestName: req.body.guestName,
-    guestPhone: req.body.guestPhone,
-    diningBehavior: req.body.diningBehavior,
-    scheduledForIso: req.body.scheduledForIso,
+    sessionId: raw.sessionId || raw.callId || `legacy_${Date.now()}`,
+    callId: raw.callId,
+    restaurantId: raw.restaurantId,
+    items: raw.items || raw.order?.items,
+    guestName: raw.guestName,
+    guestPhone: raw.guestPhone,
+    diningBehavior: raw.diningBehavior,
+    scheduledForIso: raw.scheduledForIso,
   };
   const parsed = submitOrderSchema.safeParse(payload);
   if (!parsed.success) {
@@ -649,7 +937,7 @@ app.post("/webhooks/vapi/order", async (req, res) => {
 
 function start() {
   const baseUrl = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
-  return app.listen(PORT, HOST, () => {
+  const srv = app.listen(PORT, HOST, () => {
     logger.info(
       {
         host: HOST,
@@ -662,6 +950,11 @@ function start() {
       "Voice agent backend started",
     );
   });
+  srv.on("error", (err) => {
+    logger.fatal({ err, port: PORT, host: HOST }, "server_listen_failed");
+    process.exit(1);
+  });
+  return srv;
 }
 
 if (require.main === module) start();
