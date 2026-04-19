@@ -202,6 +202,27 @@ function normalizeSubmitOrderBody(body) {
   return next;
 }
 
+/**
+ * Voice/tool providers often treat non-2xx HTTP as a generic "technical" failure and never
+ * surface the JSON body to the model. Return 200 + success:false so the assistant can read
+ * userMessage and details.
+ */
+function invalidToolPayloadBody(zodError) {
+  const issues = zodError?.issues || [];
+  const first = issues[0];
+  const pathStr = first?.path?.length ? first.path.map(String).join(".") : "request";
+  const msg = first?.message || "validation failed";
+  let hint =
+    "Confirm sessionId, callId, restaurantId, guest name, phone, and each item has toastGuid or menuItemName.";
+  const combined = `${pathStr} ${msg}`.toLowerCase();
+  if (combined.includes("scheduled") || combined.includes("datetime") || combined.includes("offset")) {
+    hint =
+      "scheduledForIso must be full ISO-8601 with a real timezone offset (e.g. 2026-04-19T17:00:00-04:00). Omit it only for ASAP pickup.";
+  }
+  const userMessage = `We could not place that yet: ${pathStr} — ${msg}. ${hint}`.slice(0, 500);
+  return { success: false, error: "invalid_payload", details: issues, userMessage };
+}
+
 function withAuth(req, res) {
   if (!WEBHOOK_API_KEY) return true;
   if (req.header("x-api-key") === WEBHOOK_API_KEY) return true;
@@ -1102,7 +1123,7 @@ app.patch("/internal/orders-hub/orders/:hubOrderId", (req, res) => {
 app.post("/tools/get_menu", async (req, res) => {
   if (!withAuth(req, res)) return;
   const parsed = getMenuSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ success: false, error: "invalid_payload", details: parsed.error.issues });
+  if (!parsed.success) return res.status(200).json(invalidToolPayloadBody(parsed.error));
 
   const { nowIso } = parsed.data;
   if (!isRestaurantOpen(nowIso)) {
@@ -1129,7 +1150,7 @@ app.post("/tools/submit_order", async (req, res) => {
   if (!withAuth(req, res)) return;
   const parsed = submitOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
   if (!parsed.success) {
-    return res.status(400).json({ success: false, error: "invalid_payload", details: parsed.error.issues });
+    return res.status(200).json(invalidToolPayloadBody(parsed.error));
   }
   const out = await performSubmitOrder(parsed.data);
   return res.status(out.status).json(out.json);
@@ -1139,7 +1160,7 @@ app.post("/tools/cancel_order", async (req, res) => {
   if (!withAuth(req, res)) return;
   const parsed = cancelOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
   if (!parsed.success) {
-    return res.status(400).json({ success: false, error: "invalid_payload", details: parsed.error.issues });
+    return res.status(200).json(invalidToolPayloadBody(parsed.error));
   }
   const out = await performCancelOrder(parsed.data);
   return res.status(out.status).json(out.json);
@@ -1149,7 +1170,7 @@ app.post("/tools/modify_order", async (req, res) => {
   if (!withAuth(req, res)) return;
   const parsed = modifyOrderSchema.safeParse(normalizeSubmitOrderBody(req.body));
   if (!parsed.success) {
-    return res.status(400).json({ success: false, error: "invalid_payload", details: parsed.error.issues });
+    return res.status(200).json(invalidToolPayloadBody(parsed.error));
   }
   const payload = parsed.data;
   const hubRow = findAmendableHubOrder({
@@ -1273,7 +1294,7 @@ app.post("/webhooks/vapi/order", async (req, res) => {
   };
   const parsed = submitOrderSchema.safeParse(payload);
   if (!parsed.success) {
-    return res.status(400).json({ success: false, error: "invalid_payload", details: parsed.error.issues });
+    return res.status(200).json(invalidToolPayloadBody(parsed.error));
   }
   return processSubmitOrder(req, res, parsed.data);
 });

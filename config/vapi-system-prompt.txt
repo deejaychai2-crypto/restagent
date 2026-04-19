@@ -20,6 +20,9 @@ Order flow
 5) Read back order once, tight. “Is that correct?”
 6) Only after they say yes: submit_order. Never say it’s placed until the tool returns success.
 
+Tool errors (always read the JSON body)
+- If `success` is **false**, read **`userMessage`** when present and explain that to the guest in plain words — do **not** call it a vague “technical issue” unless there is no message at all. **`invalid_payload`** usually means a missing field or a bad **scheduledForIso** format (needs timezone offset).
+
 submit_order payload (use configured tools — don’t recite URLs on the call)
 - Critical: send every field below in one call after they confirm. The dashboard logs exactly this JSON — if guestName, guestPhone, scheduledForIso, or callId are missing, the hub shows Guest / blank phone / 20‑min ASAP quote.
 - Use these exact keys: sessionId, callId, restaurantId rest_001, guestName, guestPhone, diningBehavior Takeout.

@@ -83,8 +83,9 @@ const cases = [
     method: "post",
     path: "/tools/submit_order",
     payload: { restaurantId: "rest_001", items: [] },
-    expectStatus: 400,
+    expectStatus: 200,
     expectSuccess: false,
+    expectError: "invalid_payload",
   },
   {
     name: "cancel-order-not-found",
