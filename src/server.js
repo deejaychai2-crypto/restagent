@@ -145,6 +145,8 @@ function isPlaceholderCorrelationId(value) {
   if (!s) return true;
   if (/^session[_-]?123$/.test(s)) return true;
   if (/^call[_-]?123$/.test(s)) return true;
+  if (/^session[_-]?00?1$/.test(s)) return true;
+  if (/^call[_-]?00?1$/.test(s)) return true;
   if (s === "session" || s === "call" || s === "sess_123") return true;
   return false;
 }
@@ -152,6 +154,21 @@ function isPlaceholderCorrelationId(value) {
 function normalizeGuestKey(name) {
   if (!name || typeof name !== "string") return "";
   return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** Digits only; for 10+ digits compare last 10 (US-style) so (555) 123-4567 matches +15551234567. */
+function normalizePhoneKey(phone) {
+  if (phone == null) return "";
+  const digits = String(phone).replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.length >= 10) return digits.slice(-10);
+  return digits;
+}
+
+function phoneKeysMatch(storedPhone, incomingPhone) {
+  const a = normalizePhoneKey(storedPhone);
+  const b = normalizePhoneKey(incomingPhone);
+  return Boolean(a && b && a === b);
 }
 
 /** Flatten common LLM / Vapi shapes so the hub matches what was said on the call. */
@@ -640,38 +657,58 @@ function hubOrderAmendable(o) {
 }
 
 /**
- * Resolve which hub row to amend. Never guess "latest" when multiple open orders share sessionId
- * without a callId — that mis-attributes cancels/modifies across callers who reused tool defaults.
+ * Pick one amendable hub row from a pool. When ignoreCallId is true (phone fallback), callId is not used so a new Vapi call can amend an order placed on an earlier call.
  */
-function resolveAmendableHubOrder({ sessionId, callId, orderGuid, guestName }) {
-  const orders = loadOrdersHubStore();
-  const candidates = orders.filter((o) => o.sessionId === sessionId && hubOrderAmendable(o));
-  if (orderGuid) {
-    const row = candidates.find((o) => o.orderGuid === orderGuid);
-    if (!row) return { ok: false, reason: "not_found" };
-    if (callId && row.callId && String(row.callId) !== String(callId)) return { ok: false, reason: "not_found" };
-    return { ok: true, row };
-  }
-  if (callId) {
-    const matched = candidates.filter((o) => o.callId && String(o.callId) === String(callId));
+function disambiguateOrderPool(pool, { callId, guestName, ignoreCallId }) {
+  if (!pool || pool.length === 0) return { ok: false, reason: "not_found" };
+  const work = pool.slice();
+  const callStrong = callId && String(callId).trim() && !isPlaceholderCorrelationId(callId);
+  if (!ignoreCallId && callStrong) {
+    const matched = work.filter((o) => o.callId && String(o.callId) === String(callId));
     if (matched.length === 0) return { ok: false, reason: "not_found" };
     matched.sort((a, b) => new Date(b.placedAt).getTime() - new Date(a.placedAt).getTime());
     return { ok: true, row: matched[0] };
   }
-
-  let pool = candidates.slice();
-  if (pool.length > 1) {
+  if (work.length > 1) {
     const gk = normalizeGuestKey(guestName);
     if (gk) {
-      const named = pool.filter((o) => normalizeGuestKey(o.guestName) === gk);
+      const named = work.filter((o) => normalizeGuestKey(o.guestName) === gk);
       if (named.length === 1) return { ok: true, row: named[0] };
       if (named.length > 1) return { ok: false, reason: "ambiguous" };
       return { ok: false, reason: "not_found" };
     }
     return { ok: false, reason: "ambiguous" };
   }
-  if (pool.length === 0) return { ok: false, reason: "not_found" };
-  return { ok: true, row: pool[0] };
+  return { ok: true, row: work[0] };
+}
+
+/**
+ * Resolve which hub row to amend. Session/call first when sessionId is non-placeholder; then
+ * guestPhone + guestName so a new phone call can modify an open order without sharing the old
+ * Vapi call id. Never guess "latest" when multiple open orders match without a disambiguator.
+ */
+function resolveAmendableHubOrder({ sessionId, callId, orderGuid, guestName, guestPhone }) {
+  const orders = loadOrdersHubStore();
+  const amendableAll = orders.filter((o) => hubOrderAmendable(o));
+
+  if (orderGuid) {
+    const row = amendableAll.find((o) => o.orderGuid === orderGuid);
+    if (!row) return { ok: false, reason: "not_found" };
+    return { ok: true, row };
+  }
+
+  const sessionStrong = sessionId && String(sessionId).trim() && !isPlaceholderCorrelationId(sessionId);
+  const sessionPool = sessionStrong ? amendableAll.filter((o) => o.sessionId === sessionId) : [];
+  const sessionPick = disambiguateOrderPool(sessionPool, { callId, guestName, ignoreCallId: false });
+  if (sessionPick.ok) return sessionPick;
+  if (sessionPick.reason === "ambiguous") return sessionPick;
+
+  const phoneKey = normalizePhoneKey(guestPhone);
+  if (!phoneKey) return sessionPick;
+
+  const phonePool = amendableAll.filter((o) => phoneKeysMatch(o.guestPhone, guestPhone));
+  const phonePick = disambiguateOrderPool(phonePool, { callId, guestName, ignoreCallId: true });
+  return phonePick;
 }
 
 function clearIdempotencyEntry(idempotencyKey) {
@@ -811,7 +848,7 @@ async function voidToastOrder(orderGuid) {
 }
 
 const AMBIGUOUS_ORDERS_USER_MESSAGE =
-  "More than one open order is tied to this session. Send guestName matching the pickup name on the check, orderGuid from submit_order, or configure tools with Vapi's unique call id for sessionId and callId — the pickup phone in the conversation does not replace those fields in the JSON.";
+  "More than one open order matches. Send guestName exactly as the pickup name on the check, or orderGuid from submit_order. If several people share one phone, the name is required. Configuring sessionId and callId to Vapi's {{call.id}} still helps for same-call updates.";
 
 async function performCancelOrder(payload) {
   const pick = resolveAmendableHubOrder({
@@ -819,6 +856,7 @@ async function performCancelOrder(payload) {
     callId: payload.callId,
     orderGuid: payload.orderGuid,
     guestName: payload.guestName,
+    guestPhone: payload.guestPhone,
   });
   if (!pick.ok && pick.reason === "ambiguous") {
     return {
@@ -1139,6 +1177,7 @@ const cancelOrderSchema = z.object({
   sessionId: z.string().min(1),
   callId: z.string().optional(),
   guestName: z.string().max(120).optional(),
+  guestPhone: z.string().max(40).optional(),
   restaurantId: z.string().min(1),
   orderGuid: z.string().optional(),
   reason: z.string().max(240).optional(),
@@ -1237,6 +1276,7 @@ app.post("/tools/modify_order", async (req, res) => {
     callId: payload.callId,
     orderGuid: undefined,
     guestName: payload.guestName,
+    guestPhone: payload.guestPhone,
   });
   if (!pick.ok && pick.reason === "ambiguous") {
     return res.json({
@@ -1321,6 +1361,7 @@ app.post("/tools/modify_order", async (req, res) => {
     sessionId: payload.sessionId,
     callId: payload.callId,
     guestName: payload.guestName,
+    guestPhone: payload.guestPhone,
     restaurantId: payload.restaurantId,
     orderGuid: hubRow.orderGuid,
     reason: "Customer changed the order",

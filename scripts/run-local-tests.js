@@ -391,6 +391,153 @@ async function main() {
     });
   }
 
+  // New Vapi session (different sessionId/callId): resolve open order by pickup phone + name.
+  try {
+    const ts = Date.now();
+    // Unique national numbers so persisted hub rows from older runs do not collide on phone fallback.
+    const uniquePriya = `+1${5550000000 + (ts % 8_999_999)}`;
+    const placePhone = uniquePriya;
+    const modifyPhone = uniquePriya;
+    const placeSess = `sess-phone-place-${ts}`;
+    const placeCall = `call-phone-place-${ts}`;
+    const modSess = `sess-phone-mod-${ts}`;
+    const modCall = `call-phone-mod-${ts}`;
+    const subPhone = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        sessionId: placeSess,
+        callId: placeCall,
+        restaurantId: "rest_001",
+        guestName: "Priya",
+        guestPhone: placePhone,
+        items: [{ menuItemName: "Chicken Dum Biryani", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const modPhone = await axios.post(
+      `${baseUrl}/tools/modify_order`,
+      {
+        sessionId: modSess,
+        callId: modCall,
+        restaurantId: "rest_001",
+        guestName: "Priya",
+        guestPhone: modifyPhone,
+        modifyMode: "replace",
+        items: [
+          { menuItemName: "Lamb Chops", quantity: 1 },
+          { menuItemName: "Rasmalai", quantity: 2 },
+        ],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const hubPhone = await axios.get(`${baseUrl}/internal/orders-hub/orders`, { headers, timeout: 10000, validateStatus: () => true });
+    const priyaOpen = (hubPhone.data?.orders || []).find(
+      (o) =>
+        o.guestName === "Priya" &&
+        o.fulfillmentStatus !== "Cancelled" &&
+        o.fulfillmentStatus !== "Completed" &&
+        o.items.some((it) => it.name === "Lamb Chops"),
+    );
+    const phoneCrossSessOk =
+      subPhone.status === 200 &&
+      subPhone.data.success === true &&
+      modPhone.status === 200 &&
+      modPhone.data.success === true &&
+      priyaOpen &&
+      priyaOpen.items.some((it) => it.name === "Lamb Chops") &&
+      priyaOpen.items.some((it) => it.name === "Rasmalai") &&
+      !priyaOpen.items.some((it) => it.name === "Chicken Dum Biryani");
+
+    const sharedPhone = `+1${5560000000 + (ts % 8_999_999)}`;
+    const s1 = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        sessionId: `sess-sp1-${ts}`,
+        callId: `c-sp1-${ts}`,
+        restaurantId: "rest_001",
+        guestName: "Alex",
+        guestPhone: sharedPhone,
+        items: [{ menuItemName: "Garlic Naan", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const s2 = await axios.post(
+      `${baseUrl}/tools/submit_order`,
+      {
+        sessionId: `sess-sp2-${ts}`,
+        callId: `c-sp2-${ts}`,
+        restaurantId: "rest_001",
+        guestName: "Blake",
+        guestPhone: sharedPhone,
+        items: [{ menuItemName: "Chicken Dum Biryani", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const ambPhone = await axios.post(
+      `${baseUrl}/tools/modify_order`,
+      {
+        sessionId: `sess-spx-${ts}`,
+        callId: `c-spx-${ts}`,
+        restaurantId: "rest_001",
+        guestPhone: sharedPhone,
+        modifyMode: "replace",
+        items: [{ menuItemName: "Lamb Chops", quantity: 1 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const modAlex = await axios.post(
+      `${baseUrl}/tools/modify_order`,
+      {
+        sessionId: `sess-spy-${ts}`,
+        callId: `c-spy-${ts}`,
+        restaurantId: "rest_001",
+        guestName: "Alex",
+        guestPhone: sharedPhone,
+        modifyMode: "replace",
+        items: [{ menuItemName: "Lamb Chops", quantity: 2 }],
+      },
+      { headers, timeout: 10000, validateStatus: () => true },
+    );
+    const hub2 = await axios.get(`${baseUrl}/internal/orders-hub/orders`, { headers, timeout: 10000, validateStatus: () => true });
+    const alexOpen = (hub2.data?.orders || []).find(
+      (o) => o.guestName === "Alex" && o.fulfillmentStatus !== "Cancelled" && o.fulfillmentStatus !== "Completed",
+    );
+    const blakeOpen = (hub2.data?.orders || []).find(
+      (o) => o.guestName === "Blake" && o.fulfillmentStatus !== "Cancelled" && o.fulfillmentStatus !== "Completed",
+    );
+    const samePhoneDisambigOk =
+      s1.status === 200 &&
+      s1.data.success === true &&
+      s2.status === 200 &&
+      s2.data.success === true &&
+      ambPhone.status === 200 &&
+      ambPhone.data.success === false &&
+      ambPhone.data.error === "ambiguous_active_orders" &&
+      modAlex.status === 200 &&
+      modAlex.data.success === true &&
+      alexOpen &&
+      alexOpen.items.some((it) => it.name === "Lamb Chops") &&
+      blakeOpen &&
+      blakeOpen.items.some((it) => it.name === "Chicken Dum Biryani");
+
+    results.push({
+      name: "modify-order-phone-fallback-and-shared-phone-disambiguation",
+      pass: phoneCrossSessOk && samePhoneDisambigOk,
+      status: phoneCrossSessOk && samePhoneDisambigOk ? 200 : "assert",
+      data:
+        phoneCrossSessOk && samePhoneDisambigOk
+          ? {}
+          : { subPhone: subPhone.data, modPhone: modPhone.data, ambPhone: ambPhone.data, modAlex: modAlex.data, priyaOpen, alexOpen, blakeOpen },
+    });
+  } catch (error) {
+    results.push({
+      name: "modify-order-phone-fallback-and-shared-phone-disambiguation",
+      pass: false,
+      status: "network-error",
+      data: { message: error.message },
+    });
+  }
+
   // Duplicate submit_order with same callId merges guest + schedule into Orders Hub (no second Toast order).
   const mergeCallId = `hub-merge-${Date.now()}`;
   const mergeBase = {
